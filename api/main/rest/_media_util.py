@@ -12,7 +12,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 from django.conf import settings
 
-from ..store import get_storage_lookup
+from ..store import get_storage_lookup, get_tator_store
 from ..models import Resource
 
 logger = logging.getLogger(__name__)
@@ -82,7 +82,11 @@ class MediaUtil:
                     quality_idx = idx
             # Image
             self._video_file = images[quality_idx]["path"]
-            self._storage = store_lookup[self._video_file]
+            try:
+                self._storage = store_lookup[self._video_file]
+            except Exception as e:
+                logger.error(f"Failed to get storage for {self._video_file} with error {e}")
+                self._storage = None
             self._height = video.height
             self._width = video.width
         else:
@@ -455,7 +459,13 @@ class MediaUtil:
         lower = upper + roi[1] * self._height
 
         out = io.BytesIO()
-        self._storage.download_fileobj(self._video_file, out)
+        if self._storage is None:
+            # Attempt to download the file from a url
+            import requests
+            response = requests.get(self._video_file)
+            out = io.BytesIO(response.content)
+        else:
+            self._storage.download_fileobj(self._video_file, out)
         out.seek(0)
         img = Image.open(out)
         img = img.crop((left, upper, right, lower))
