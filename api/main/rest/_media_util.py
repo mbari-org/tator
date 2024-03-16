@@ -1,4 +1,9 @@
 """ TODO: add documentation for this """
+import uuid
+
+import requests
+from pathlib import Path
+
 import logging
 import os
 import json
@@ -458,10 +463,21 @@ class MediaUtil:
         right = left + roi[0] * self._width
         lower = upper + roi[1] * self._height
 
+        # Create a unique file name
+        video_path = Path(self._video_file)
+        unique_crop = f"{uuid.uuid5(uuid.NAMESPACE_DNS, video_path.stem + str(upper) + str(right) + str(lower))}.png"
+        crop_path = Path(
+            f"/static/{video_path.stem}/{unique_crop}")  # Check if the file exists and if not write it for future use
+        if not crop_path.exists():
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            with crop_path.open("rb") as f:
+                img_bytes = f.read()
+                img_buf = io.BytesIO(img_bytes)
+                return img_buf.getvalue()
+
         out = io.BytesIO()
-        if self._storage is None:
-            # Attempt to download the file from a url
-            import requests
+        if self._storage is None and 'mp4' not in self._video_file:
             response = requests.get(self._video_file)
             out = io.BytesIO(response.content)
         else:
@@ -469,6 +485,7 @@ class MediaUtil:
         out.seek(0)
         img = Image.open(out)
         img = img.crop((left, upper, right, lower))
+        img.save(crop_path.as_posix())
 
         if force_scale is not None:
             img = img.resize(force_scale)
