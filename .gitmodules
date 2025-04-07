@@ -1,15 +1,15 @@
 [submodule "scripts/packages/tator-py"]
 	path = scripts/packages/tator-py
-	url = ../tator-py.git
+	url = https://github.com/cvisionai/tator-py.git
 [submodule "scripts/packages/tator-r"]
 	path = scripts/packages/tator-r
-	url = ../tator-r.git
+	url = https://github.com/cvisionai/tator-r.git
 [submodule "scripts/packages/tator-js"]
 	path = scripts/packages/tator-js
-	url = ../tator-js
+	url = https://github.com/mbari-org/tator-js.git
 [submodule "containers/tator_transcode"]
 	path = containers/tator_transcode
-	url = ../tator-transcode
+	url = https://github.com/cvisionai/tator-transcode.git
 [submodule "containers/svt_transcoder"]
 	path = containers/svt_transcoder
-	url = ../svt_transcoder
+	url = https://github.com/cvisionai/svt_transcoder.git
