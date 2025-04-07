@@ -6,7 +6,7 @@ MAIN_HOST=localhost
 PORT=8080
 
 # Docker registry for Tator images
-REGISTRY=cvisionai
+REGISTRY=mbari
 
 # Path to local Tator data directory
 DATA_DIR=${HOME}/tator_data
