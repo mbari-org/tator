@@ -1,4 +1,8 @@
 """ TODO: add documentation for this """
+import uuid
+
+import requests
+from pathlib import Path
 
 import logging
 import os
@@ -53,7 +57,15 @@ class MediaUtil:
             else:
                 self._external_fetch = None
                 self._video_file = video.media_files["streaming"][quality_idx]["path"]
-                self._storage = store_lookup[self._video_file]
+                try:
+                    self._storage = store_lookup[self._video_file]
+                except Exception as e:
+                    logger.error(f"Failed to get storage for {self._video_file} with error {e}")
+                    self._storage = None
+                    self._height = video.media_files["streaming"][quality_idx]["resolution"][0]
+                    self._width = video.media_files["streaming"][quality_idx]["resolution"][1]
+                    self._fps = video.fps
+                    return
                 self._height = video.media_files["streaming"][quality_idx]["resolution"][0]
                 self._width = video.media_files["streaming"][quality_idx]["resolution"][1]
                 segment_file = video.media_files["streaming"][quality_idx]["segment_info"]
@@ -83,7 +95,11 @@ class MediaUtil:
                     quality_idx = idx
             # Image
             self._video_file = images[quality_idx]["path"]
-            self._storage = store_lookup[self._video_file]
+            try:
+                self._storage = store_lookup[self._video_file]
+            except Exception as e:
+                logger.error(f"Failed to get storage for {self._video_file} with error {e}")
+                self._storage = None
             self._height = video.height
             self._width = video.width
         else:
@@ -455,11 +471,29 @@ class MediaUtil:
         right = left + roi[0] * self._width
         lower = upper + roi[1] * self._height
 
+        # Create a unique file name
+        video_path = Path(self._video_file)
+        unique_crop = f"{uuid.uuid5(uuid.NAMESPACE_DNS, video_path.stem + str(upper) + str(right) + str(lower))}.png"
+        crop_path = Path(f"/static/{video_path.stem}/{unique_crop}")
+        if not crop_path.exists():
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            with crop_path.open("rb") as f:
+                img_bytes = f.read()
+                img_buf = io.BytesIO(img_bytes)
+                return img_buf.getvalue()
+
         out = io.BytesIO()
-        self._storage.download_fileobj(self._video_file, out)
+        if self._storage is None:
+            if 'mp4' not in self._video_file:
+                response = requests.get(self._video_file)
+                out = io.BytesIO(response.content)
+        else:
+            self._storage.download_fileobj(self._video_file, out)
         out.seek(0)
         img = Image.open(out)
         img = img.crop((left, upper, right, lower))
+        img.save(crop_path.as_posix())
 
         if force_scale is not None:
             img = img.resize(force_scale)
@@ -471,10 +505,52 @@ class MediaUtil:
             img.save(img_buf, "png", quality=95)
         return img_buf.getvalue()
 
+    def get_cropped_from_external(self, frame_num, roi) -> str:
+        """Generate a cropped image from an external video source"""
+        if roi is None: # Capture full frame if no ROI specified
+            roi = [0.99990, 0.999990, 0., 0.]
+
+        left = roi[2] * self._width
+        upper = roi[3] * self._height
+        right = left + roi[0] * self._width
+        lower = upper + roi[1] * self._height
+
+        # Create a unique file name
+        video_path = Path(self._video_file)
+        unique_crop = f"{uuid.uuid5(uuid.NAMESPACE_DNS, video_path.stem + str(upper) + str(right) + str(lower))}.png"
+        crop_path = Path(f"/static/{video_path.stem}/{unique_crop}")
+        if not crop_path.parent.exists():
+            crop_path.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Creating {crop_path.parent}")
+        if not crop_path.exists():
+            logger.info(f"Creating {crop_path} at {frame_num} with {roi}")
+            args = [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                self._frame_to_time_str(frame_num, None),
+                "-i",
+                self._video_file,
+                "-vf",
+                f"crop={int(roi[0] * self._width)}:{int(roi[1] * self._height)}:{int(roi[2] * self._width)}:{int(roi[3] * self._height)}",
+                "-frames:v",
+                "1",
+                crop_path.as_posix(),
+            ]
+            logger.info(args)
+            proc = subprocess.run(args, check=True, capture_output=True)
+        return crop_path.as_posix()
+
     def get_tile_image(
         self, frames, rois=None, tile_size=None, render_format="jpg", force_scale=None
     ):
         """Generate a tile jpeg of the given frame/rois"""
+        if self._storage is None:
+            if len(rois) == 0:
+                return self.get_cropped_from_external(frames[0], None)
+            else:
+                return self.get_cropped_from_external(frames[0], rois[0])
+
         # Compute tile size if not supplied explicitly
         try:
             if tile_size is not None:
