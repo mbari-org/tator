@@ -13,7 +13,7 @@ Quick start
 Install [Docker](https://www.docker.com/), then:
 
 ```bash
-git clone --branch stable --recurse-submodules
+git clone --recurse-submodules
 cd tator
 cp example-env .env
 make tator
