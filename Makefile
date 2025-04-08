@@ -60,6 +60,7 @@ help:
 	@echo "\t\t - migrate : Runs migrate on server (manage.py)"
 	@echo "\t\t - status : Prints status of container deployment"
 	@echo "\t\t - reset : Reset all pods"
+	@echo "\t\t - mbari : Make MBARI docker registry images and push"
 
 	@echo "\t\t - imageQuery: Make sentinel files match docker registry"
 	@echo "\t\t - imageHold: Hold sentinel files to current time"
@@ -140,6 +141,14 @@ tator: .env api/main/version.py clean_schema
 	GIT_VERSION=$(GIT_VERSION) docker compose run --rm create-extensions
 	GIT_VERSION=$(GIT_VERSION) docker compose run --rm migrate
 	GIT_VERSION=$(GIT_VERSION) docker compose up -d
+
+mbari:
+	$(MAKE) tator-image transcode-image postgis-image ui-image client-image
+	docker push mbari/tator_online:$(GIT_VERSION)
+	docker push mbari/tator_transcode:$(GIT_VERSION)
+	docker push mbari/tator_postgis:$(GIT_VERSION)
+	docker push mbari/tator_ui:$(GIT_VERSION)
+	docker push mbari/tator_client:$(GIT_VERSION)
 
 cluster: api/main/version.py clean_schema
 	$(MAKE) images .token/tator_online_$(GIT_VERSION) cluster-install
