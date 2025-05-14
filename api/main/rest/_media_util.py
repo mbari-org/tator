@@ -527,14 +527,12 @@ class MediaUtil:
             args = [
                 "ffmpeg",
                 "-y",
-                "-ss",
-                self._frame_to_time_str(frame_num, None),
-                "-i",
-                self._video_file,
+                "-i", self._video_file,
                 "-vf",
+                f"select='eq(n\\,{frame_num})',"
                 f"crop={int(roi[0] * self._width)}:{int(roi[1] * self._height)}:{int(roi[2] * self._width)}:{int(roi[3] * self._height)}",
-                "-frames:v",
-                "1",
+                "-vsync", "0",
+                "-frames:v", "1",
                 crop_path.as_posix(),
             ]
             logger.info(args)
