@@ -2,6 +2,29 @@
 
 include .env
 
+
+# Detect OS (Darwin = macOS, Linux = Linux)
+UNAME_S := $(shell uname -s)
+
+ifeq ($(UNAME_S),Darwin)
+  SED_INPLACE = sed -i ''
+else
+  SED_INPLACE = sed -i
+endif
+
+
+ifeq ($(UNAME_S),Darwin)
+  # On macOS, just use the default Ubuntu mirror
+  APT_REPO_HOST=http://archive.ubuntu.com/ubuntu/
+else
+  # On Linux, try to auto-detect from /etc/apt/sources.list
+  APT_REPO_HOST ?= $(shell cat /etc/apt/sources.list | grep -E "focal main|jammy main" | grep -v cdrom | head -n1 | awk '{print $$2}')
+  ifeq ($(APT_REPO_HOST),)
+    APT_REPO_HOST=http://archive.ubuntu.com/ubuntu/
+  endif
+endif
+
+
 CONTAINERS=ui postgis redis gunicorn nginx minio transcode transcode-worker db-worker image-worker gunicorn-cron postgis-cron
 
 OPERATIONS=reset logs bash
@@ -268,25 +291,21 @@ cache-clear:
 images: ${IMAGES}
 	@echo "Built ${IMAGES}"
 
-$(TATOR_PY_WHEEL_FILE): doc/_build/schema.yaml
+$(TATOR_PY_DEV_WHEEL_FILE): doc/_build/schema.yaml scripts/packages/tator-py/config.json
 	cp doc/_build/schema.yaml scripts/packages/tator-py/.
-	cd scripts/packages/tator-py
-	rm -rf dist
-	python3 setup.py sdist bdist_wheel
-	if [ ! -f dist/*.whl ]; then
-		exit 1
-	fi
-	cd ../../..
+	( \
+	  cd scripts/packages/tator-py && \
+	  rm -rf dist && \
+	  python3 setup.py sdist bdist_wheel && \
+	  if [ ! -f dist/*.whl ]; then exit 1; fi \
+	)
 
 $(TATOR_PY_DEV_WHEEL_FILE): doc/_build/schema.yaml scripts/packages/tator-py/config.json
 	cp doc/_build/schema.yaml scripts/packages/tator-py/.
-	cd scripts/packages/tator-py
-	rm -rf dist
-	python3 setup.py sdist bdist_wheel
-	if [ ! -f dist/*.whl ]; then
-		exit 1
-	fi
-	cd ../../..
+	rm -rf scripts/packages/tator-py/dist
+	cd scripts/packages/tator-py && \
+	  python3 setup.py sdist bdist_wheel && \
+	  if [ ! -f dist/*.whl ]; then exit 1; fi
 
 # OBE with partial rebuilds working, here for backwards compatibility.
 .PHONY: python-bindings-only
@@ -300,7 +319,7 @@ python-bindings:
 .PHONY: install-dev-python
 install-dev-python:
 	cp scripts/packages/tator-py/config.json scripts/packages/tator-py/.config.json
-	sed -i "s/DEVELOPMENT_VERSION/${FAKE_DEV_VERSION}/g" scripts/packages/tator-py/config.json
+	$(SED_INPLACE) "s/DEVELOPMENT_VERSION/${FAKE_DEV_VERSION}/g" scripts/packages/tator-py/config.json
 	$(MAKE) $(TATOR_PY_DEV_WHEEL_FILE)
 	mv scripts/packages/tator-py/.config.json scripts/packages/tator-py/config.json
 
@@ -370,13 +389,11 @@ markdown-docs:
 	python3 scripts/format_markdown.py ./doc/_build/markdown/tator-py/models.md ./doc/_build/tator-py/models.md
 	python3 scripts/format_markdown.py ./doc/_build/markdown/tator-py/exceptions.md ./doc/_build/tator-py/exceptions.md
 
-
 # Only run if schema changes
-doc/_build/schema.yaml: $(shell find api/main/schema/ -name "*.py") .token/tator_online_$(GIT_VERSION)
-	rm -fr doc/_build/schema.yaml
-	mkdir -p doc/_build
-	docker run --rm -e DJANGO_SECRET_KEY=1337 $(REGISTRY)/tator_online:$(GIT_VERSION) python3 manage.py getschema > doc/_build/schema.yaml
-	sed -i "s/\^\@//g" doc/_build/schema.yaml
+doc/_build/schema.yaml:
+	docker run --rm -e DJANGO_SECRET_KEY=1337 mbari/tator_online:284b29fb416deaf751a8eb410e1b74d6be9c41fa \
+	  python3 manage.py generateschema --format yaml --output $@
+	$(SED_INPLACE) "s/\^\@//g" $@
 
 # Hold over
 .PHONY: schema
