@@ -57,29 +57,28 @@ class MediaUtil:
             else:
                 self._external_fetch = None
                 self._video_file = video.media_files["streaming"][quality_idx]["path"]
-                try:
-                    self._storage = store_lookup[self._video_file]
-                except Exception as e:
-                    logger.error(f"Failed to get storage for {self._video_file} with error {e}")
+                if "http" in self._video_file:
+                    # If the video file is a http link, we don't need to download it
                     self._storage = None
                     self._height = video.media_files["streaming"][quality_idx]["resolution"][0]
                     self._width = video.media_files["streaming"][quality_idx]["resolution"][1]
                     self._fps = video.fps
-                    return
-                self._height = video.media_files["streaming"][quality_idx]["resolution"][0]
-                self._width = video.media_files["streaming"][quality_idx]["resolution"][1]
-                segment_file = video.media_files["streaming"][quality_idx]["segment_info"]
-                f_p = io.BytesIO()
-                self._storage.download_fileobj(segment_file, f_p)
-                self._segment_info = json.loads(f_p.getvalue().decode("utf-8"))
-                self._moof_data = [
-                    (i, x)
-                    for i, x in enumerate(self._segment_info["segments"])
-                    if x["name"] == "moof"
-                ]
-                self._start_bias_frame = 0
-                if self._moof_data[0][1]["frame_start"] > 0:
-                    self._start_bias_frame = self._moof_data[0][1]["frame_start"]
+                else:
+                    self._storage = store_lookup[self._video_file]
+                    self._height = video.media_files["streaming"][quality_idx]["resolution"][0]
+                    self._width = video.media_files["streaming"][quality_idx]["resolution"][1]
+                    segment_file = video.media_files["streaming"][quality_idx]["segment_info"]
+                    f_p = io.BytesIO()
+                    self._storage.download_fileobj(segment_file, f_p)
+                    self._segment_info = json.loads(f_p.getvalue().decode("utf-8"))
+                    self._moof_data = [
+                        (i, x)
+                        for i, x in enumerate(self._segment_info["segments"])
+                        if x["name"] == "moof"
+                    ]
+                    self._start_bias_frame = 0
+                    if self._moof_data[0][1]["frame_start"] > 0:
+                        self._start_bias_frame = self._moof_data[0][1]["frame_start"]
 
         elif "image" in video.media_files:
             # Select highest quality image that is non AVIF (no ffmpeg support)
@@ -95,6 +94,7 @@ class MediaUtil:
                     quality_idx = idx
             # Image
             self._video_file = images[quality_idx]["path"]
+
             try:
                 self._storage = store_lookup[self._video_file]
             except Exception as e:
@@ -236,13 +236,18 @@ class MediaUtil:
             frame -= relative_to
 
         if frame < 0:
-            frame += self._start_bias_frame
+            # If there is a frame bias, we need to adjust the frame number
+            if hasattr(self, "_start_bias_frame"):
+                logger.info(f"Adjusting frame {frame} by bias {self._start_bias_frame}")
+                frame += self._start_bias_frame
+            else:
+                logger.warning(f"Negative frame {frame} without bias, setting to 0")
+                frame = 0
 
         total_seconds = frame / self._fps
-        hours = math.floor(total_seconds / 3600)
-        minutes = math.floor((total_seconds % 3600) / 60)
-        seconds = total_seconds % 60
-        return f"{hours}:{minutes}:{seconds}"
+        total_microseconds = int(total_seconds * 1_000_000)
+        return f"{total_microseconds}us"
+
 
     def _generate_frame_images(self, frames, rois=None, render_format="jpg", force_scale=None):
         """Generate a jpg for each requested frame and store in the working directory"""
@@ -300,7 +305,7 @@ class MediaUtil:
                     inputs.extend(
                         [
                             "-ss",
-                            self._frame_to_time_str(frame, lookup[frame][0]),
+                            self._frame_to_time_str(frame - 1, lookup[frame][0]),
                             "-i",
                             lookup[frame][1],
                         ]
@@ -309,7 +314,7 @@ class MediaUtil:
                     inputs.extend(
                         [
                             "-ss",
-                            self._frame_to_time_str(frame, None),
+                            self._frame_to_time_str(frame - 1, None),
                             "-f",
                             "hls",
                             "-i",
@@ -508,7 +513,7 @@ class MediaUtil:
     def get_cropped_from_external(self, frame_num, roi) -> str:
         """Generate a cropped image from an external video source"""
         if roi is None: # Capture full frame if no ROI specified
-            roi = [0.99990, 0.999990, 0., 0.]
+            roi = [0.999990, 0.999990, 0., 0.]
 
         left = roi[2] * self._width
         upper = roi[3] * self._height
@@ -517,26 +522,28 @@ class MediaUtil:
 
         # Create a unique file name
         video_path = Path(self._video_file)
-        unique_crop = f"{uuid.uuid5(uuid.NAMESPACE_DNS, video_path.stem + str(upper) + str(right) + str(lower))}.png"
+        unique_crop = f"{uuid.uuid5(uuid.NAMESPACE_DNS, video_path.stem + str(frame_num) + str(upper) + str(right) + str(lower))}.png"
         crop_path = Path(f"/static/{video_path.stem}/{unique_crop}")
         if not crop_path.parent.exists():
             crop_path.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Creating {crop_path.parent}")
-        if not crop_path.exists():
-            logger.info(f"Creating {crop_path} at {frame_num} with {roi}")
-            args = [
-                "ffmpeg",
-                "-y",
-                "-i", self._video_file,
-                "-vf",
-                f"select='eq(n\\,{frame_num})',"
-                f"crop={int(roi[0] * self._width)}:{int(roi[1] * self._height)}:{int(roi[2] * self._width)}:{int(roi[3] * self._height)}",
-                "-vsync", "0",
-                "-frames:v", "1",
-                crop_path.as_posix(),
-            ]
-            logger.info(args)
-            proc = subprocess.run(args, check=True, capture_output=True)
+        logger.info(f"Creating {crop_path} at {frame_num} with {roi}")
+        args = [
+            "ffmpeg",
+            "-y",
+            "-ss",
+            self._frame_to_time_str(max(0,frame_num - 90), None),
+            "-i",
+            self._video_file,
+            "-vf",
+            f"select='eq(n\\,{max(0,frame_num - 1)})',"
+            f"crop={int(roi[0] * self._width)}:{int(roi[1] * self._height)}:{int(roi[2] * self._width)}:{int(roi[3] * self._height)}",
+            "-frames:v",
+            "1",
+            crop_path.as_posix(),
+        ]
+        logger.info(args)
+        proc = subprocess.run(args, check=True, capture_output=True)
         return crop_path.as_posix()
 
     def get_tile_image(
