@@ -261,16 +261,16 @@ class MediaUtil:
                 crop_filter = []
                 for c in rois:  # pylint: disable=invalid-name
                     w = max(
-                        0, min(round(c[0] * self._width), self._width)
+                        0, min(round(c[0] * self._width), self._width-1)
                     )  # pylint: disable=invalid-name
                     h = max(
-                        0, min(round(c[1] * self._height), self._height)
+                        0, min(round(c[1] * self._height), self._height-1)
                     )  # pylint: disable=invalid-name
                     x = max(
-                        0, min(round(c[2] * self._width), self._width)
+                        0, min(round(c[2] * self._width), self._width-1)
                     )  # pylint: disable=invalid-name
                     y = max(
-                        0, min(round(c[3] * self._height), self._height)
+                        0, min(round(c[3] * self._height), self._height-1)
                     )  # pylint: disable=invalid-name
                     crop_filter.append(f"crop={w}:{h}:{x}:{y}")
             scale_filter = None
@@ -337,16 +337,16 @@ class MediaUtil:
         scale_filter = None
         if roi:
             w = max(
-                0, min(round(roi[0] * self._width), self._width)
+                0, min(round(roi[0] * self._width), self._width-1)
             )  # pylint: disable=invalid-name
             h = max(
-                0, min(round(roi[1] * self._height), self._height)
+                0, min(round(roi[1] * self._height), self._height-1)
             )  # pylint: disable=invalid-name
             x = max(
-                0, min(round(roi[2] * self._width), self._width)
+                0, min(round(roi[2] * self._width), self._width-1)
             )  # pylint: disable=invalid-name
             y = max(
-                0, min(round(roi[3] * self._height), self._height)
+                0, min(round(roi[3] * self._height), self._height-1)
             )  # pylint: disable=invalid-name
             crop_filter = f"crop={w}:{h}:{x}:{y}"
         if force_scale:
@@ -520,6 +520,12 @@ class MediaUtil:
         right = left + roi[0] * self._width
         lower = upper + roi[1] * self._height
 
+        # Calculate absolute crop values (in pixels)
+        crop_x = min(int(roi[0] * self._width), self._width)
+        crop_y = min(int(roi[1] * self._height), self._height)
+        crop_width = max(int(roi[2] * self._width),1)
+        crop_height = max(int(roi[3] * self._height),1)
+
         # Create a unique file name
         video_path = Path(self._video_file)
         unique_crop = f"{uuid.uuid5(uuid.NAMESPACE_DNS, video_path.stem + str(frame_num) + str(upper) + str(right) + str(lower))}.png"
@@ -527,17 +533,20 @@ class MediaUtil:
         if not crop_path.parent.exists():
             crop_path.parent.mkdir(parents=True, exist_ok=True)
             logger.info(f"Creating {crop_path.parent}")
+        if crop_path.exists():
+            logger.info(f"{crop_path.parent} already exists. Skipping creation")
+            return crop_path.as_posix()
         logger.info(f"Creating {crop_path} at {frame_num} with {roi}")
         args = [
             "ffmpeg",
             "-y",
-            "-ss",
-            self._frame_to_time_str(max(0,frame_num - 90), None),
             "-i",
             self._video_file,
+            "-ss",
+            self._frame_to_time_str(max(0,frame_num-1), None),
             "-vf",
             f"select='eq(n\\,{max(0,frame_num - 1)})',"
-            f"crop={int(roi[0] * self._width)}:{int(roi[1] * self._height)}:{int(roi[2] * self._width)}:{int(roi[3] * self._height)}",
+            f"crop={crop_x}:{crop_y}:{crop_width}:{crop_height}",
             "-frames:v",
             "1",
             crop_path.as_posix(),
