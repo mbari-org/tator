@@ -156,7 +156,7 @@ check-migration:
 
 .PHONY: tator
 tator: .env api/main/version.py clean_schema
-	patch -t -p1 < patches/add-localization-labels.patch
+	patch -t -p1 < add-localization-labels.patch
 	docker network inspect public >/dev/null 2>&1 || \
     docker network create public
 	GIT_VERSION=$(GIT_VERSION) docker compose up -d postgis --wait
