@@ -1,20 +1,21 @@
 diff --git a/scripts/packages/tator-js/src/annotator/annotation.js b/scripts/packages/tator-js/src/annotator/annotation.js
+index 156a83a..d4e0aa7 100644
 --- a/scripts/packages/tator-js/src/annotator/annotation.js
 +++ b/scripts/packages/tator-js/src/annotator/annotation.js
-@@ -4877,6 +4877,11 @@ export class AnnotationCanvas extends HTMLElement
-     {
+@@ -4881,6 +4881,12 @@ export class AnnotationCanvas extends HTMLElement
        drawContext = this._draw;
      }
-+
+ 
 +    // Clear previous frame's localization labels
 +    // Only clear if we're drawing to the main canvas (not offscreen)
 +    if (drawContext === this._draw) {
 +      this._textOverlay.clearAll("localization-labels");
 +    }
- 
++
      // scale factor based on canvas height versus image height
      // Draw commands are in viewspace coordinates, but annotations
-@@ -4976,6 +4981,41 @@ export class AnnotationCanvas extends HTMLElement
+     // are in image coordinates.
+@@ -5000,6 +5006,44 @@ export class AnnotationCanvas extends HTMLElement
              {
                drawContext.fillPolygon(poly, width, fill.color, fill.alpha,[2.0,0,0,0]);
              }
@@ -59,7 +60,7 @@ diff --git a/scripts/packages/tator-js/src/annotator/annotation.js b/scripts/pac
            }
            else if (type == 'line')
            {
-@@ -4985,6 +5025,34 @@ export class AnnotationCanvas extends HTMLElement
+@@ -5009,12 +5053,78 @@ export class AnnotationCanvas extends HTMLElement
              {
                this.accentWithHandles(drawContext,type, line, localization.color, width, colorInfo.alpha, true);
              }
@@ -138,4 +139,3 @@ diff --git a/scripts/packages/tator-js/src/annotator/annotation.js b/scripts/pac
            }
            else
            {
-
