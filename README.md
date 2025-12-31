@@ -1,5 +1,3 @@
-[![logo](https://github.com/cvisionai/tator/raw/main/ui/server/static/images/tator-logo.png)](https://www.tator.io)
-[![cvisionai](https://circleci.com/gh/cvisionai/tator.svg?style=shield)](https://circleci.com/gh/cvisionai/tator)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 [![code style: prettier](https://img.shields.io/badge/code_style-prettier-ff69b4.svg?style=flat-square)](https://github.com/prettier/prettier)
 
@@ -13,7 +11,7 @@ Quick start
 Install [Docker](https://www.docker.com/), then:
 
 ```bash
-git clone --recurse-submodules
+git clone --recurse-submodules git@github.com:mbari-org/tator.git
 cd tator
 cp example-env .env
 make tator
@@ -21,6 +19,8 @@ make superuser
 ```
 
 Enter desired superuser credentials, then open your browser on the same node to `http://localhost:8080`.
+
+Projects that MBARI is using Tator for (internal only) https://docs.mbari.org/ai/projects
 
 Documentation
 =============
@@ -35,16 +35,6 @@ Blog
 ====
 
 Visit [our blog](https://www.tator.io/blog/) for upcoming features, development roadmap, news and announcements.
-
-
-Screenshots
-===========
-
-<img src="https://github.com/cvisionai/tator/assets/7937658/31eb1c49-aed3-4b2f-990f-27b410037532" alt="SAM applet" />
-<p></p>
-<img src="https://github.com/cvisionai/tator/assets/7937658/8ce714c8-ab7c-4648-9c53-493777e3182d" alt="Annotation view" />
-<p></p>
-<img src="https://github.com/cvisionai/tator/assets/7937658/9f423b3d-be1b-4664-afc8-c18527654b24" alt="Localization analytics view" />
 
 Tator Enterprise
 ================
