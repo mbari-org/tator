@@ -158,22 +158,35 @@ check-migration:
 tator: .env api/main/version.py clean_schema
 	docker network inspect public >/dev/null 2>&1 || \
     docker network create public
-	GIT_VERSION=$(GIT_VERSION) docker compose up -d postgis --wait
-	GIT_VERSION=$(GIT_VERSION) docker compose up -d minio --wait
-	GIT_VERSION=$(GIT_VERSION) docker compose up -d redis --wait
-	GIT_VERSION=$(GIT_VERSION) docker compose run --rm create-extensions
-	GIT_VERSION=$(GIT_VERSION) docker compose run --rm migrate
-	GIT_VERSION=$(GIT_VERSION) docker compose up -d
+	@# Default to mbari registry for tator target if REGISTRY not explicitly set
+	$(eval REGISTRY := $(if $(filter None,$(REGISTRY)),mbari,$(if $(REGISTRY),$(REGISTRY),mbari)))
+	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose up -d postgis --wait
+	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose up -d minio --wait
+	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose up -d redis --wait
+	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose run --rm create-extensions
+	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose run --rm migrate
+	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose up -d
 
-mbari:
-	$(MAKE) doc/_build/schema.yaml
-	$(MAKE) tator-image transcode-image postgis-image ui-image client-image
+mbari: api/main/version.py clean_schema
+	REGISTRY=mbari $(MAKE) tator-image transcode-image postgis-image ui-image client-image svt-image
+	docker tag mbari/tator_online:$(GIT_VERSION) mbari/tator_online:latest
+	docker tag mbari/tator_transcode:$(GIT_VERSION) mbari/tator_transcode:latest
+	docker tag mbari/tator_postgis:$(GIT_VERSION) mbari/tator_postgis:latest
+	docker tag mbari/tator_ui:$(GIT_VERSION) mbari/tator_ui:latest
+	docker tag mbari/tator_client:$(GIT_VERSION) mbari/tator_client:latest
+	docker tag mbari/svt_transcoder:$(GIT_VERSION) mbari/svt_transcoder:latest
 	docker push mbari/tator_online:$(GIT_VERSION)
 	docker push mbari/tator_transcode:$(GIT_VERSION)
 	docker push mbari/tator_postgis:$(GIT_VERSION)
 	docker push mbari/tator_ui:$(GIT_VERSION)
 	docker push mbari/tator_client:$(GIT_VERSION)
-	docker push mbari/tator_postgis:$(GIT_VERSION)
+	docker push mbari/svt_transcoder:$(GIT_VERSION)
+	docker push mbari/tator_online:latest
+	docker push mbari/tator_transcode:latest
+	docker push mbari/tator_postgis:latest
+	docker push mbari/tator_ui:latest
+	docker push mbari/tator_client:latest
+	docker push mbari/svt_transcoder:latest
 
 cluster: api/main/version.py clean_schema
 	$(MAKE) images .token/tator_online_$(GIT_VERSION) cluster-install
@@ -419,6 +432,10 @@ doc/_build/schema.yaml:
 		exit 1; \
 	fi
 	$(SED_INPLACE) "s/\^\@//g" $@
+	@# Fix paths that incorrectly include hostname - they should start with /
+	@# Match any hostname followed by /rest/ or /anonymous-gateway and remove hostname
+	$(SED_INPLACE) -E "s|^  [a-zA-Z0-9.-]+/(rest/)|  /\1|g" $@
+	$(SED_INPLACE) -E "s|^  [a-zA-Z0-9.-]+/(anonymous-gateway:)|  /\1|g" $@
 
 # Hold over
 .PHONY: schema
