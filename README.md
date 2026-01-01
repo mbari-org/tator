@@ -20,7 +20,7 @@ make superuser
 
 Enter desired superuser credentials, then open your browser on the same node to `http://localhost:8080`.
 
-Projects that MBARI is using Tator for (internal only) https://docs.mbari.org/ai/projects
+Projects that MBARI is using Tator for (internal only) https://docs.mbari.org/internal/ai/projects
 
 Documentation
 =============
