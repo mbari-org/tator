@@ -166,6 +166,7 @@ tator: .env api/main/version.py clean_schema
 	GIT_VERSION=$(GIT_VERSION) docker compose up -d
 
 mbari:
+	$(MAKE) doc/_build/schema.yaml
 	$(MAKE) tator-image transcode-image postgis-image ui-image client-image
 	docker push mbari/tator_online:$(GIT_VERSION)
 	docker push mbari/tator_transcode:$(GIT_VERSION)
@@ -309,6 +310,15 @@ $(TATOR_PY_DEV_WHEEL_FILE): doc/_build/schema.yaml scripts/packages/tator-py/con
 	  python3 setup.py sdist bdist_wheel && \
 	  if [ ! -f dist/*.whl ]; then exit 1; fi
 
+$(TATOR_PY_WHEEL_FILE): doc/_build/schema.yaml scripts/packages/tator-py/config.json
+	cp doc/_build/schema.yaml scripts/packages/tator-py/.
+	( \
+	  cd scripts/packages/tator-py && \
+	  rm -rf dist && \
+	  python3 setup.py sdist bdist_wheel && \
+	  if [ ! -f dist/*.whl ]; then exit 1; fi \
+	)
+
 # OBE with partial rebuilds working, here for backwards compatibility.
 .PHONY: python-bindings-only
 python-bindings-only:
@@ -393,8 +403,21 @@ markdown-docs:
 
 # Only run if schema changes
 doc/_build/schema.yaml:
-	docker run --rm -e DJANGO_SECRET_KEY=1337 mbari/tator_online:284b29fb416deaf751a8eb410e1b74d6be9c41fa \
-	  python3 manage.py generateschema --format yaml --output $@
+	mkdir -p doc/_build
+	@if docker compose ps gunicorn >/dev/null 2>&1; then \
+		GIT_VERSION=$(GIT_VERSION) docker compose exec -T gunicorn python3 manage.py getschema > $@; \
+	elif docker inspect $(REGISTRY)/tator_online:$(GIT_VERSION) >/dev/null 2>&1; then \
+		docker run --rm -e DJANGO_SECRET_KEY=1337 \
+		  -v $(shell pwd):/workspace \
+		  -w /workspace \
+		  $(REGISTRY)/tator_online:$(GIT_VERSION) \
+		  python3 manage.py getschema > $@; \
+	else \
+		echo "Error: Cannot generate schema. Either:"; \
+		echo "  1. Start docker compose: make tator"; \
+		echo "  2. Build the image first: make tator-image"; \
+		exit 1; \
+	fi
 	$(SED_INPLACE) "s/\^\@//g" $@
 
 # Hold over
