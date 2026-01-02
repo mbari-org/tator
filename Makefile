@@ -232,7 +232,6 @@ tator-image:
 
 .PHONY: ui-image
 ui-image:
-	patch -t -p1 < add-localization-labels.patch
 	cd ui && npm install && npm run build && npm prune --production && cd ..
 	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 --pull --build-arg GIT_VERSION=$(GIT_VERSION) --network host -t $(REGISTRY)/tator_ui:$(GIT_VERSION) -f containers/tator_ui/Dockerfile . || exit 255
 
