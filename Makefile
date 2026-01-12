@@ -168,7 +168,7 @@ tator: .env api/main/version.py clean_schema
 	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose up -d
 
 mbari: api/main/version.py clean_schema
-	REGISTRY=mbari $(MAKE) tator-image transcode-image postgis-image ui-image client-image svt-image
+	REGISTRY=mbari $(MAKE) tator-image transcode-image postgis-image client-image ui-image svt-image
 	docker tag mbari/tator_online:$(GIT_VERSION) mbari/tator_online:latest
 	docker tag mbari/tator_transcode:$(GIT_VERSION) mbari/tator_transcode:latest
 	docker tag mbari/tator_postgis:$(GIT_VERSION) mbari/tator_postgis:latest
@@ -226,32 +226,32 @@ endif
 
 .PHONY: tator-image
 tator-image:
-	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 --pull --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --network host -t $(REGISTRY)/tator_online:$(GIT_VERSION) -f containers/tator/Dockerfile . || exit 255
+	DOCKER_BUILDKIT=1 docker build --pull --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --network host -t $(REGISTRY)/tator_online:$(GIT_VERSION) -f containers/tator/Dockerfile . || exit 255
 	mkdir -p .token
 	touch .token/tator_online_$(GIT_VERSION)
 
 .PHONY: ui-image
 ui-image:
 	cd ui && npm install && npm run build && npm prune --production && cd ..
-	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 --pull --build-arg GIT_VERSION=$(GIT_VERSION) --network host -t $(REGISTRY)/tator_ui:$(GIT_VERSION) -f containers/tator_ui/Dockerfile . || exit 255
+	DOCKER_BUILDKIT=1 docker build --pull --build-arg GIT_VERSION=$(GIT_VERSION) --network host -t $(REGISTRY)/tator_ui:$(GIT_VERSION) -f containers/tator_ui/Dockerfile . || exit 255
 
 .PHONY: postgis-image
 postgis-image:
-	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 --pull --network host -t $(REGISTRY)/tator_postgis:$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) -f containers/postgis/Dockerfile . || exit 255
+	DOCKER_BUILDKIT=1 docker  build --pull --network host -t $(REGISTRY)/tator_postgis:$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) -f containers/postgis/Dockerfile . || exit 255
 
 .PHONY: svt-image
 svt-image:
-	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 --pull --network host -t $(REGISTRY)/svt_transcoder:$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) -f containers/svt_transcoder/Dockerfile containers/svt_transcoder || exit 255
+	DOCKER_BUILDKIT=1 docker build --pull --network host -t $(REGISTRY)/svt_transcoder:$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) -f containers/svt_transcoder/Dockerfile containers/svt_transcoder || exit 255
 	docker tag $(REGISTRY)/svt_transcoder:$(GIT_VERSION) $(REGISTRY)/svt_transcoder:latest
 
 .PHONY: client-image
 client-image: $(TATOR_PY_WHEEL_FILE) svt-image
-	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 --network host -t $(REGISTRY)/tator_client:$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --build-arg BASE_IMAGE=$(REGISTRY)/svt_transcoder:$(GIT_VERSION) -f containers/tator_client/Dockerfile . || exit 255
+	DOCKER_BUILDKIT=1 docker build --network host -t $(REGISTRY)/tator_client:$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --build-arg BASE_IMAGE=$(REGISTRY)/svt_transcoder:$(GIT_VERSION) -f containers/tator_client/Dockerfile . || exit 255
 	docker tag $(REGISTRY)/tator_client:$(GIT_VERSION) $(REGISTRY)/tator_client:latest
 
 .PHONY: transcode-image
 transcode-image:
-	DOCKER_BUILDKIT=1 docker buildx build --platform linux/amd64,linux/arm64 --pull --network host -t $(REGISTRY)/tator_transcode:$(GIT_VERSION) -f containers/tator_transcode/Dockerfile containers/tator_transcode || exit 255
+	DOCKER_BUILDKIT=1 docker build --pull --network host -t $(REGISTRY)/tator_transcode:$(GIT_VERSION) -f containers/tator_transcode/Dockerfile containers/tator_transcode || exit 255
 
 
 ifeq ($(shell cat api/main/version.py), $(shell ./scripts/version.sh))
