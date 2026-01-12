@@ -322,6 +322,29 @@ export class EntityCard extends TatorElement {
     this._mediaInit = false;
   }
 
+  /**
+   * Generate a color from a string hash
+   * @param {string} str - The string to hash
+   * @returns {string} - A color in RGB format
+   */
+  _hashToColor(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = str.charCodeAt(i) + ((hash << 5) - hash);
+    }
+    // Generate RGB values using different parts of the hash
+    // Use modulo to ensure values are in valid RGB range (0-255)
+    const r = Math.abs(hash) % 256;
+    const g = Math.abs(hash * 31) % 256;
+    const b = Math.abs(hash * 127) % 256;
+    // Ensure minimum brightness for visibility on dark backgrounds (150-255 range)
+    const minBrightness = 150;
+    const rAdjusted = Math.max(r, minBrightness);
+    const gAdjusted = Math.max(g, minBrightness);
+    const bAdjusted = Math.max(b, minBrightness);
+    return `rgb(${rAdjusted}, ${gAdjusted}, ${bAdjusted})`;
+  }
+
   set multiEnabled(val) {
     // console.log("entity-card multiEnabled set..." + val);
     this._multiEnabled = val;
@@ -483,6 +506,14 @@ export class EntityCard extends TatorElement {
             obj[key] !== "" &&
             key !== "type"
           ) {
+            const isLabel = key === "Label";
+            let labelColor = null;
+            let valueColorStyle = '';
+            if (isLabel) {
+              const value = obj[this._type][key];
+              labelColor = this._hashToColor(value);
+              valueColorStyle = `style="color: ${labelColor}"`;
+            }
             if (
               key.indexOf("_by") > -1 &&
               this._membershipMap.has(Number(obj[this._type][key]))
@@ -491,33 +522,48 @@ export class EntityCard extends TatorElement {
               const username = this._membershipMap.get(
                 Number(obj[this._type][key])
               );
-              keyString = `<span class="text-dark-gray">${key}</span>: ${username}`;
+              keyString = `${key}: <span ${valueColorStyle}>${username}</span>`;
             } else {
-              keyString = `<span class="text-dark-gray">${key}</span>: ${
-                obj[this._type][key]
-              }`;
+              const value = obj[this._type][key];
+              keyString = `${key}: <span ${valueColorStyle}>${value}</span>`;
             }
           } else if (
             key === "type" &&
             typeof obj.entityType["dtype"] !== null &&
             obj.entityType["dtype"] !== ""
           ) {
-            keyString = `<span class="text-dark-gray">${key}</span>: ${obj.entityType["name"]}`;
+            const isLabel = key === "Label";
+            let labelColor = null;
+            let valueColorStyle = '';
+            if (isLabel) {
+              const value = obj.entityType["name"];
+              labelColor = this._hashToColor(value);
+              valueColorStyle = `style="color: ${labelColor}"`;
+            }
+            keyString = `${key}: <span ${valueColorStyle}>${obj.entityType["name"]}</span>`;
           } else {
-            keyString = `<span class="text-dark-gray"><span class="text-dark-gray">${key}</span>: <<span class="text-italics ">not set</span>></span>`;
+            keyString = `${key}: <<span class="text-italics ">not set</span>>`;
           }
         } else {
           key = attr.name;
 
+          const isLabel = key === "Label";
+          let labelColor = null;
+          let valueColorStyle = '';
           if (
             obj.attributes !== null &&
             typeof obj.attributes[key] !== "undefined" &&
             obj.attributes[key] !== null &&
             obj.attributes[key] !== ""
           ) {
-            keyString = `<span class="text-dark-gray">${key}</span>: ${obj.attributes[key]}`;
+            if (isLabel) {
+              const value = obj.attributes[key];
+              labelColor = this._hashToColor(value);
+              valueColorStyle = `style="color: ${labelColor}"`;
+            }
+            keyString = `${key}: <span ${valueColorStyle}>${obj.attributes[key]}</span>`;
           } else {
-            keyString = `<span class="text-dark-gray"><span class="text-dark-gray">${key}</span>: <<span class="text-italics ">not set</span>></span>`;
+            keyString = `${key}: <<span class="text-italics ">not set</span>>`;
           }
         }
 
@@ -604,28 +650,42 @@ export class EntityCard extends TatorElement {
       this._id_text.innerHTML = `ID: ${data.id}`;
       for (let [attr, value] of Object.entries(data.attributes)) {
         if (typeof this.attributeDivs[attr] !== "undefined") {
+          const isLabel = attr === "Label";
+          let labelColor = null;
+          let valueColorStyle = '';
+          if (isLabel && value) {
+            labelColor = this._hashToColor(value);
+            valueColorStyle = `style="color: ${labelColor}"`;
+          }
           if (this.attributeDivs[attr] != null) {
             this.attributeDivs[
               attr
-            ].value.innerHTML = `<span class="text-dark-gray">${attr}</span>: ${value}`;
+            ].value.innerHTML = `${attr}: <span ${valueColorStyle}>${value}</span>`;
           } else {
             this.attributeDivs[
               attr
-            ].value.innerHTML = `<span class="text-dark-gray"><span class="text-dark-gray">${attr}</span>: <<span class="text-italics ">not set</span>></span>`;
+            ].value.innerHTML = `${attr}: <<span class="text-italics ">not set</span>>`;
           }
         }
       }
       for (let attr_key of this.builtIns) {
         if (data[attr_key]) {
           if (typeof this.attributeDivs[attr_key] !== "undefined") {
+            const isLabel = attr_key === "Label";
+            let labelColor = null;
+            let valueColorStyle = '';
+            if (isLabel) {
+              labelColor = this._hashToColor(data[attr_key]);
+              valueColorStyle = `style="color: ${labelColor}"`;
+            }
             if (this.attributeDivs[attr_key] != null) {
               this.attributeDivs[
                 attr_key
-              ].value.innerHTML = `<span class="text-dark-gray">${attr_key}</span>: ${data[attr_key]}`;
+              ].value.innerHTML = `${attr_key}: <span ${valueColorStyle}>${data[attr_key]}</span>`;
             } else {
               this.attributeDivs[
                 attr_key
-              ].value.innerHTML = `<span class="text-dark-gray"><span class="text-dark-gray">${attr}</span>: <<span class="text-italics ">not set</span>></span>`;
+              ].value.innerHTML = `${attr_key}: <<span class="text-italics ">not set</span>>`;
             }
           }
         }

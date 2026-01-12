@@ -10,7 +10,7 @@
 
 .entity-gallery__ul {
   display: grid;
-  grid-gap: 20px;
+  grid-gap: 0;
   grid-template-columns: repeat(auto-fill, minmax(272px, 272px));
 }
 
@@ -245,14 +245,14 @@ collections-card {
 
 .entity-gallery-slider__ul {
   display: grid;
-  grid-gap: 15px;
+  grid-gap: 3px;
   grid-auto-flow: row;
   grid-template-columns: repeat(auto-fill, minmax(272px, 1fr));
   overflow: hidden;
 }
 .entity-gallery-slider__ul.open {
   display: grid;
-  grid-gap: 15px;
+  grid-gap: 3px;
   width: 100%;
   overflow: hidden;
   background-image: none;

@@ -305,7 +305,7 @@ class MediaUtil:
                     inputs.extend(
                         [
                             "-ss",
-                            self._frame_to_time_str(frame - 1, lookup[frame][0]),
+                            self._frame_to_time_str(frame, lookup[frame][0]),
                             "-i",
                             lookup[frame][1],
                         ]
@@ -314,7 +314,7 @@ class MediaUtil:
                     inputs.extend(
                         [
                             "-ss",
-                            self._frame_to_time_str(frame - 1, None),
+                            self._frame_to_time_str(frame, None),
                             "-f",
                             "hls",
                             "-i",
@@ -545,7 +545,7 @@ class MediaUtil:
             "-ss",
             self._frame_to_time_str(max(0,frame_num-1), None),
             "-vf",
-            f"select='eq(n\\,{max(0,frame_num - 1)})',"
+            f"select='eq(n\\,{max(0,frame_num)})',"
             f"crop={crop_x}:{crop_y}:{crop_width}:{crop_height}",
             "-frames:v",
             "1",
