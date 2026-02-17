@@ -62,6 +62,7 @@ This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.
      - `base_port`: `5151`
      - `iframe_host`: `localhost` — host the **browser** uses to load the FiftyOne iframe. Use a hostname the user’s browser can resolve (e.g. `localhost`). Do **not** use `host.docker.internal` here (browsers cannot resolve it).
      - `message`: optional header text (if set, replaces the default status line)
+     - `config_yaml`: optional YAML config string for FiftyOne; shown in the header and exposed as `window.FIFTYONE_CONFIG_YAML` for scripts
 
 Click **Save**.
 

@@ -73,7 +73,7 @@ async def get_embed(job_id: str) -> dict:
 # Jinja2 template for Tator Hosted Template (applet/dashboard).
 # See: https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates
 # Required tparams: project (int, Tator project ID).
-# Optional: iframe_host (host the browser loads; use localhost or your Tator host—do NOT use host.docker.internal), base_port, message.
+# Optional: iframe_host, base_port, message, config_yaml (YAML config string for FiftyOne).
 LAUNCHER_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -86,6 +86,7 @@ LAUNCHER_TEMPLATE = """
     html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #1a1a1a; color: #e0e0e0; }
     .applet-header { padding: 0.75rem 1rem; background: #2a2a2a; border-bottom: 1px solid #444; font-size: 0.875rem; }
     .applet-header p { margin: 0; }
+    .applet-header .config-yaml { margin-top: 0.5rem; font-size: 0.75rem; color: #999; white-space: pre-wrap; word-break: break-all; max-height: 6em; overflow: auto; }
     .applet-iframe { display: block; width: 100%; height: calc(100% - 48px); border: none; }
   </style>
 </head>
@@ -95,6 +96,9 @@ LAUNCHER_TEMPLATE = """
     <p>{{ message }}</p>
     {% else %}
     <p>Voxel51 FiftyOne viewer – Project {{ project }} (port {{ (base_port | default(5151) | int) + (project | int) }})</p>
+    {% endif %}
+    {% if config_yaml %}
+    <div id="config-yaml-data" class="config-yaml" title="config_yaml" data-config="{{ config_yaml | e }}">{{ config_yaml }}</div>
     {% endif %}
   </div>
   <iframe
@@ -110,12 +114,16 @@ LAUNCHER_TEMPLATE = """
       var basePort = {{ (base_port | default(5151)) | int }};
       var port = basePort + project;
       var iframeSrc = 'http://' + iframeHost + ':' + port + '/';
+      var configYamlEl = document.getElementById('config-yaml-data');
+      var configYaml = configYamlEl ? (configYamlEl.getAttribute('data-config') || '') : '';
+      if (configYaml) window.FIFTYONE_CONFIG_YAML = configYaml;
       console.log('[FiftyOne Dashboard] Launcher loaded', {
         project: project,
         iframe_host: iframeHost,
         base_port: basePort,
         port: port,
-        iframe_src: iframeSrc
+        iframe_src: iframeSrc,
+        has_config_yaml: !!configYaml
       });
       var iframe = document.getElementById('fiftyone-iframe');
       if (iframe) {
@@ -156,7 +164,7 @@ async def message_template() -> HTMLResponse:
 async def render_launcher() -> HTMLResponse:
     """
     Return Jinja2 template for HostedTemplate. Tator fetches this URL and renders with tparams.
-    Required tparams: project (Tator project ID). Optional: host, base_port (default 5151).
+    Required tparams: project (Tator project ID). Optional: iframe_host, base_port (default 5151), message, config_yaml.
     Port for FiftyOne App = base_port + project.
     """
     return HTMLResponse(LAUNCHER_TEMPLATE)
