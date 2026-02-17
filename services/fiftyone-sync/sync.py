@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import date, datetime
 from typing import Any
 
 from port_manager import get_database_name, get_session
@@ -16,6 +17,15 @@ logger = logging.getLogger(__name__)
 
 CHUNK_SIZE = 200
 LOCALIZATION_BATCH_SIZE = 5000
+
+
+def _json_serial(obj: Any) -> Any:
+    """Convert datetime/date to epoch seconds (float) for JSON serialization."""
+    if isinstance(obj, datetime):
+        return obj.timestamp()
+    if isinstance(obj, date):
+        return datetime.combine(obj, datetime.min.time()).timestamp()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
 def _project_tmp_dir(project_id: int) -> str:
@@ -157,7 +167,6 @@ def fetch_and_save_localizations(
     out_path = os.path.join(base_dir, "localizations.jsonl")
     print(f"[sync] Localizations JSONL will be saved to: {out_path}", flush=True)
     batch_size = LOCALIZATION_BATCH_SIZE
-    # Get total count (may require type= if API needs it; try without first)
     try:
         count_kwargs = {}
         if version_id is not None:
@@ -189,7 +198,7 @@ def fetch_and_save_localizations(
             for loc in batch:
                 try:
                     obj = loc.to_dict() if hasattr(loc, "to_dict") else loc
-                    f.write(json.dumps(obj) + "\n")
+                    f.write(json.dumps(obj, default=_json_serial) + "\n")
                 except Exception as e:
                     logger.warning("Skip localization serialization: %s", e)
                     continue
@@ -224,7 +233,6 @@ def sync_project_to_fiftyone(
         print("[sync] fiftyone not installed, skipping", flush=True)
         return {"status": "skipped", "message": "fiftyone not installed"}
 
-    # Resolve MongoDB database name: explicit override > session > default pattern
     sess = get_session(project_id)
     resolved_db = (
         (database_name.strip() if database_name and database_name.strip() else None)
@@ -234,7 +242,6 @@ def sync_project_to_fiftyone(
     fo.config.database_name = resolved_db
     print(f"[sync] database_name={resolved_db}", flush=True)
 
-    # Fetch media IDs, get media objects in chunks, download to project-isolated /tmp; then fetch localizations in batches
     media_ids_list: list[int] = []
     tmp_dir = ""
     localizations_path = ""
@@ -259,7 +266,6 @@ def sync_project_to_fiftyone(
                 tmp_dir = save_media_to_tmp(api, project_id, all_media)
                 if tmp_dir:
                     print("saved_media_dir:", tmp_dir, flush=True)
-        import pdb;pdb.set_trace()
         print(f"[sync] Fetching localizations...", flush=True)
         localizations_path = fetch_and_save_localizations(api, project_id, version_id=version_id)
         if localizations_path:
@@ -267,14 +273,6 @@ def sync_project_to_fiftyone(
     except Exception as e:
         logger.exception("fetch/save media or localizations failed: %s", e)
         print(f"[sync] Error: {e}", flush=True)
-
-    # Full implementation would:
-    # 1. Use version_id and media list for localizations
-    # 2. Resolve media URLs (download_info or frame URLs)
-    # 3. Create fo.Dataset, add samples with filepath, add detections from localizations
-    # 4. Optionally compute embeddings via embedding_service and attach
-    # 5. fo.launch_app(dataset, port=port, remote=True)
-    # 6. Store session/process in port_manager for later shutdown
 
     print(f"[sync] sync_project_to_fiftyone done: saved_media_dir={tmp_dir or None} saved_localizations_path={localizations_path or None}", flush=True)
     logger.info(
@@ -291,7 +289,7 @@ def sync_project_to_fiftyone(
 
 
 def main() -> None:
-    """Read env (HOST, TOKEN, PROJECT_ID, optional MEDIA_IDS) and print media IDs."""
+    """Read env (HOST, TOKEN, PROJECT_ID, optional MEDIA_IDS, VERSION_ID) and fetch media + localizations."""
     host = os.getenv("HOST", "").rstrip("/")
     token = os.getenv("TOKEN")
     project_id_str = os.getenv("PROJECT_ID")
@@ -308,15 +306,20 @@ def main() -> None:
 
     media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
     print("media_ids:", media_ids)
+    import tator
+    api = tator.get_api(host, token)
     if media_ids:
-        import tator
-        api = tator.get_api(host, token)
         all_media = get_media_chunked(api, project_id, media_ids)
         if all_media:
             saved_dir = save_media_to_tmp(api, project_id, all_media)
             print("saved_media_dir:", saved_dir)
         else:
             print("No Media objects returned; download skipped.")
+    version_id_str = os.getenv("VERSION_ID", "").strip()
+    version_id = int(version_id_str) if version_id_str else None
+    localizations_path = fetch_and_save_localizations(api, project_id, version_id=version_id)
+    if localizations_path:
+        print("saved_localizations_path (JSONL):", localizations_path)
 
 
 if __name__ == "__main__":
