@@ -8,7 +8,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from port_manager import get_database_name, get_session
@@ -212,6 +214,143 @@ def fetch_and_save_localizations(
     return out_path
 
 
+def _crop_one(
+    size: int,
+    image_path: Path,
+    loc: dict,
+    out_path: Path,
+) -> bool:
+    """
+    Crop one localization from an image: pad shorter side to square (longest side), resize to size x size.
+    Tator box: x, y, width, height as normalized 0-1.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow not installed; cannot crop")
+        return False
+    try:
+        x = float(loc.get("x", 0))
+        y = float(loc.get("y", 0))
+        w = float(loc.get("width", 0))
+        h = float(loc.get("height", 0))
+        if w <= 0 or h <= 0:
+            return False
+        img = Image.open(image_path).convert("RGB")
+        image_width, image_height = img.size
+        x1 = int(image_width * x)
+        y1 = int(image_height * y)
+        x2 = int(image_width * (x + w))
+        y2 = int(image_height * (y + h))
+        # Clamp to image bounds
+        x1 = max(0, min(x1, image_width - 1))
+        y1 = max(0, min(y1, image_height - 1))
+        x2 = max(1, min(x2, image_width))
+        y2 = max(1, min(y2, image_height))
+        width = x2 - x1
+        height = y2 - y1
+        shorter_side = min(height, width)
+        longer_side = max(height, width)
+        delta = abs(longer_side - shorter_side)
+        padding = delta // 2
+        if width == shorter_side:
+            x1 = max(0, x1 - padding)
+            x2 = min(image_width, x2 + padding)
+        else:
+            y1 = max(0, y1 - padding)
+            y2 = min(image_height, y2 + padding)
+        cropped = img.crop((x1, y1, x2, y2))
+        resample = Image.Resampling.LANCZOS if hasattr(Image, "Resampling") else Image.LANCZOS
+        resized = cropped.resize((size, size), resample=resample)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        resized.save(out_path)
+        return True
+    except Exception as e:
+        logger.warning("Crop failed for %s: %s", out_path.stem, e)
+        return False
+
+
+def crop_localizations_parallel(
+    download_dir: str,
+    localizations_jsonl_path: str,
+    crops_dir: str,
+    size: int = 224,
+    max_workers: int | None = None,
+) -> tuple[int, int]:
+    """
+    Crop all localizations from their media in parallel. Saves using elemental_id as filestem (e.g. elemental_id.png).
+    Returns (num_cropped, num_failed).
+    """
+    if not os.path.exists(download_dir) or not os.path.exists(localizations_jsonl_path):
+        logger.warning("Download dir or localizations JSONL missing; skipping crops")
+        return (0, 0)
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.warning("Pillow not installed; skipping crops")
+        return (0, 0)
+    download_path = Path(download_dir)
+    crops_path = Path(crops_dir)
+    crops_path.mkdir(parents=True, exist_ok=True)
+    media_id_to_path: dict[int, Path] = {}
+    for f in download_path.iterdir():
+        if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+            stem = f.stem
+            if "_" in stem:
+                try:
+                    mid = int(stem.split("_", 1)[0])
+                    media_id_to_path[mid] = f
+                except ValueError:
+                    pass
+    locs_by_media: dict[int, list[dict]] = {}
+    with open(localizations_jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                loc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            media_id = loc.get("media")
+            if media_id is None:
+                continue
+            mid = int(media_id)
+            if mid not in locs_by_media:
+                locs_by_media[mid] = []
+            locs_by_media[mid].append(loc)
+    tasks: list[tuple[Path, dict, Path]] = []
+    for mid, locs in locs_by_media.items():
+        image_path = media_id_to_path.get(mid)
+        if image_path is None or not image_path.exists():
+            continue
+        for loc in locs:
+            elemental_id = loc.get("elemental_id") or loc.get("id")
+            if elemental_id is None:
+                continue
+            out_path = crops_path / image_path.stem / f"{elemental_id}.png"
+            tasks.append((image_path, loc, out_path))
+    if not tasks:
+        print("[sync] No localization crops to process", flush=True)
+        return (0, 0)
+    print(f"[sync] Cropping {len(tasks)} localizations in parallel (size={size}x{size})", flush=True)
+    workers = max_workers or min(32, (os.cpu_count() or 4) * 2)
+    num_ok = 0
+    num_fail = 0
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_crop_one, size, imp, loc, op): (imp, loc, op) for imp, loc, op in tasks}
+        for fut in as_completed(futures):
+            if fut.exception():
+                num_fail += 1
+                logger.warning("Crop task failed: %s", fut.exception())
+            elif fut.result():
+                num_ok += 1
+            else:
+                num_fail += 1
+    print(f"[sync] Crops done: {num_ok} saved to {crops_path}, {num_fail} failed", flush=True)
+    return (num_ok, num_fail)
+
+
 def sync_project_to_fiftyone(
     project_id: int,
     version_id: int | None,
@@ -245,6 +384,7 @@ def sync_project_to_fiftyone(
     media_ids_list: list[int] = []
     tmp_dir = ""
     localizations_path = ""
+    crops_dir = ""
     try:
         import tator
         host = api_url.rstrip("/")
@@ -270,11 +410,14 @@ def sync_project_to_fiftyone(
         localizations_path = fetch_and_save_localizations(api, project_id, version_id=version_id)
         if localizations_path:
             print(f"[sync] saved_localizations_path (JSONL): {localizations_path}", flush=True)
+        if tmp_dir and localizations_path:
+            crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
+            crop_localizations_parallel(tmp_dir, localizations_path, crops_dir, size=224)
     except Exception as e:
         logger.exception("fetch/save media or localizations failed: %s", e)
         print(f"[sync] Error: {e}", flush=True)
 
-    print(f"[sync] sync_project_to_fiftyone done: saved_media_dir={tmp_dir or None} saved_localizations_path={localizations_path or None}", flush=True)
+    print(f"[sync] sync_project_to_fiftyone done: saved_media_dir={tmp_dir or None} saved_localizations_path={localizations_path or None} crops_dir={crops_dir or None}", flush=True)
     logger.info(
         "sync_project_to_fiftyone: project=%s port=%s database=%s",
         project_id, port, resolved_db,
@@ -285,6 +428,7 @@ def sync_project_to_fiftyone(
         "database_name": resolved_db,
         "saved_media_dir": tmp_dir or None,
         "saved_localizations_path": localizations_path or None,
+        "saved_crops_dir": crops_dir or None,
     }
 
 
@@ -320,6 +464,11 @@ def main() -> None:
     localizations_path = fetch_and_save_localizations(api, project_id, version_id=version_id)
     if localizations_path:
         print("saved_localizations_path (JSONL):", localizations_path)
+    base_dir = _project_tmp_dir(project_id)
+    download_dir = os.path.join(base_dir, "download")
+    crops_dir = os.path.join(base_dir, "crops")
+    if os.path.isdir(download_dir) and localizations_path:
+        crop_localizations_parallel(download_dir, localizations_path, crops_dir, size=224)
 
 
 if __name__ == "__main__":
