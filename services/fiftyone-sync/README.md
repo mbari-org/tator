@@ -12,6 +12,11 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
 - **Port isolation**: One FiftyOne App instance per Tator project
   - Port = 5151 + project_id
 
+- **MongoDB database isolation**: Each project uses its own FiftyOne (MongoDB) database by default
+  - Default: database name = `{FIFTYONE_DATABASE_DEFAULT}_{project_id}` (env `FIFTYONE_DATABASE_DEFAULT` defaults to `fiftyone_project`, so e.g. `fiftyone_project_1`, `fiftyone_project_2`)
+  - Override (all projects): set env `FIFTYONE_DATABASE_NAME` to use a single shared database
+  - Override (per request): pass optional query param `database_name` on `GET /launch` and `POST /sync`
+
 - **Launcher**: HostedTemplate integration
   - `GET /message` - Minimal template with single `{{ message }}` (for simple Hosted Template testing)
   - `GET /render` - Full Jinja2 template for FiftyOne viewer iframe (tparams: project, host, base_port, message)
@@ -94,6 +99,17 @@ The Hosted Template URL is **fetched by Tator’s backend** (gunicorn), not by t
 - **Check**
   - From the host: `curl http://localhost:8001/message` should return HTML.
   - From inside the Tator/gunicorn container: the same URL you put in the Hosted Template (e.g. `http://host.docker.internal:8001/message`) must work (e.g. `curl` from that container).
+
+## MongoDB database (FiftyOne)
+
+Each Tator project gets its own MongoDB database in FiftyOne for isolation unless overridden.
+
+| Env var | Purpose |
+|--------|---------|
+| `FIFTYONE_DATABASE_DEFAULT` | Prefix for per-project database names. Default `fiftyone_project` → databases `fiftyone_project_1`, `fiftyone_project_2`, etc. |
+| `FIFTYONE_DATABASE_NAME` | Override: use this single database name for all projects (ignores default pattern). |
+
+Optional query param **`database_name`** on `GET /launch` and `POST /sync` overrides the database for that project for the request (and for the session on `/launch`). Responses include `database_name` so clients know which DB is used.
 
 ## Embedding API Usage
 

@@ -5,6 +5,7 @@ Tracks project_id -> port and manages spawning/stopping FiftyOne sessions.
 
 from __future__ import annotations
 
+import os
 import logging
 from typing import Any
 
@@ -13,8 +14,22 @@ logger = logging.getLogger(__name__)
 BASE_PORT = 5151
 MAX_PROJECTS = 1000  # Ports 5151 to 5150 + MAX_PROJECTS
 
-# In-memory: project_id -> {"port": int, "process": subprocess.Popen | None, ...}
+# In-memory: project_id -> {"port": int, "process": subprocess.Popen | None, "database_name": str, ...}
 _sessions: dict[int, dict[str, Any]] = {}
+
+
+def get_database_name(project_id: int, override: str | None = None) -> str:
+    """
+    Resolve FiftyOne MongoDB database name: per-request override > FIFTYONE_DATABASE_NAME env > default pattern.
+    Empty string override is treated as no override.
+    """
+    if override and override.strip():
+        return override.strip()
+    env_name = os.environ.get("FIFTYONE_DATABASE_NAME", "").strip()
+    if env_name:
+        return env_name
+    default_prefix = os.environ.get("FIFTYONE_DATABASE_DEFAULT", "fiftyone_project")
+    return f"{default_prefix}_{project_id}"
 
 
 def get_port_for_project(project_id: int) -> int:
@@ -23,19 +38,26 @@ def get_port_for_project(project_id: int) -> int:
     return port
 
 
-def ensure_session(project_id: int, dataset_name: str | None = None) -> int:
+def ensure_session(
+    project_id: int,
+    dataset_name: str | None = None,
+    database_name: str | None = None,
+) -> int:
     """
     Ensure a FiftyOne session exists for the project. Returns the port.
     For now, we only allocate the port; actual fo.launch_app() is done by sync worker.
+    database_name is resolved via get_database_name(project_id, database_name) if not provided.
     """
     port = get_port_for_project(project_id)
     if project_id not in _sessions:
+        resolved_db = get_database_name(project_id, database_name)
         _sessions[project_id] = {
             "port": port,
             "process": None,
             "dataset_name": dataset_name or f"tator_project_{project_id}",
+            "database_name": resolved_db,
         }
-        logger.info("Allocated port %s for project %s", port, project_id)
+        logger.info("Allocated port %s for project %s (database=%s)", port, project_id, resolved_db)
     return port
 
 

@@ -17,7 +17,7 @@ from embedding_service import (
     init_disk_cache,
     queue_embedding_job,
 )
-from port_manager import ensure_session, get_port_for_project
+from port_manager import ensure_session, get_database_name, get_port_for_project, get_session
 
 app = FastAPI(
     title="FiftyOne Sync Service",
@@ -168,17 +168,20 @@ async def launch(
     version_id: int | None = Query(None),
     api_url: str | None = Query(None, description="Tator REST API base URL"),
     token: str | None = Query(None, description="Tator API token"),
+    database_name: str | None = Query(None, description="Override MongoDB database name for this project"),
 ) -> dict:
     """
     Allocate port and return FiftyOne App URL for the project.
     Sync (fetch Tator data, build dataset) is triggered separately via POST /sync.
     """
-    port = ensure_session(project_id)
+    port = ensure_session(project_id, database_name=database_name)
+    sess = get_session(project_id)
     host = os.environ.get("FIFTYONE_HOST", "localhost")
     return {
         "project_id": project_id,
         "port": port,
         "url": f"http://{host}:{port}/",
+        "database_name": (sess.get("database_name") or get_database_name(project_id)) if sess else get_database_name(project_id),
     }
 
 
@@ -188,10 +191,11 @@ async def sync(
     version_id: int | None = Query(None),
     api_url: str = Query(..., description="Tator REST API base URL (e.g. https://tator.example.com)"),
     token: str = Query(..., description="Tator API token"),
+    database_name: str | None = Query(None, description="Override MongoDB database name for this project"),
 ) -> dict:
     """
     Trigger sync: fetch Tator media + localizations, build FiftyOne dataset, launch App.
-    Requires fiftyone and tator packages. Returns port and status.
+    Requires fiftyone and tator packages. Returns port, status, and database_name.
     """
     from sync import sync_project_to_fiftyone
     from port_manager import get_port_for_project
@@ -202,6 +206,7 @@ async def sync(
         api_url=api_url.rstrip("/"),
         token=token,
         port=port,
+        database_name=database_name,
     )
     result["port"] = port
     return result
