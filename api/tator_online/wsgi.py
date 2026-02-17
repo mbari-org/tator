@@ -13,7 +13,18 @@ import traceback
 import time
 import signal
 
-from django.core.wsgi import get_wsgi_application
+# #region agent log
+def _load_wsgi():
+    from django.core.wsgi import get_wsgi_application
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tator_online.settings")
+    return get_wsgi_application()
+# #endregion
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "tator_online.settings")
-application = get_wsgi_application()
+try:
+    application = _load_wsgi()
+except Exception as e:
+    import traceback as tb
+    sys.stderr.write("DEBUG wsgi load exception: " + type(e).__name__ + ": " + str(e) + "\n")
+    tb.print_exc(file=sys.stderr)
+    sys.stderr.flush()
+    raise

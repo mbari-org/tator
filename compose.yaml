@@ -74,7 +74,7 @@ services:
   ###################################################################
 
   gunicorn:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: gunicorn
     entrypoint: gunicorn --workers 3 --worker-connections 100 --worker-class=gthread --threads=10 --timeout 600 --reload -b :80 tator_online.wsgi
     depends_on:
@@ -131,7 +131,7 @@ services:
       - private
 
   db-worker:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: db-worker
     entrypoint: python3 /tator_online/main/worker.py db_jobs
     depends_on:
@@ -143,7 +143,7 @@ services:
       - private
 
   image-worker:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: image-worker
     entrypoint: python3 /tator_online/main/worker.py image_jobs
     depends_on:
@@ -219,7 +219,7 @@ services:
       "
 
   migrate:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: migrate
     depends_on:
       - gunicorn

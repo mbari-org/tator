@@ -226,7 +226,7 @@ endif
 
 .PHONY: tator-image
 tator-image:
-	DOCKER_BUILDKIT=1 docker build --platform linux/amd64,linux/arm64 --pull --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --network host -t $(REGISTRY)/tator_online:$(GIT_VERSION) -f containers/tator/Dockerfile . || exit 255
+	@echo DOCKER_BUILDKIT=1 docker build  --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --network host -t $(REGISTRY)/tator_online:$(GIT_VERSION) -f containers/tator/Dockerfile . || exit 255
 	mkdir -p .token
 	touch .token/tator_online_$(GIT_VERSION)
 
