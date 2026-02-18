@@ -1,6 +1,7 @@
 """
 Port manager: assigns unique ports per Tator project for FiftyOne App instances.
-Tracks project_id -> port and manages spawning/stopping FiftyOne sessions.
+Uses a single MongoDB with per-project databases. Blocks PORTS_PER_PROJECT ports per project
+(up to 10 users per project). Override via FIFTYONE_DATABASE_URI.
 """
 
 from __future__ import annotations
@@ -12,10 +13,20 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 BASE_PORT = 5151
-MAX_PROJECTS = 1000  # Ports 5151 to 5150 + MAX_PROJECTS
+PORTS_PER_PROJECT = 10  # Block 10 ports per project for up to 10 users
+MAX_PROJECTS = 1000
 
 # In-memory: project_id -> {"port": int, "process": subprocess.Popen | None, "database_name": str, ...}
 _sessions: dict[int, dict[str, Any]] = {}
+
+
+def get_database_uri(_project_id: int | None = None) -> str:
+    """
+    Resolve FiftyOne MongoDB connection URI. Single MongoDB for all projects.
+    Override via FIFTYONE_DATABASE_URI. Per-project isolation is by database_name.
+    """
+    uri = os.environ.get("FIFTYONE_DATABASE_URI", "").strip()
+    return uri or "mongodb://localhost:27017"
 
 
 def get_database_name(project_id: int, override: str | None = None) -> str:
@@ -33,9 +44,12 @@ def get_database_name(project_id: int, override: str | None = None) -> str:
 
 
 def get_port_for_project(project_id: int) -> int:
-    """Return the port assigned to a project. Port = BASE_PORT + project_id."""
-    port = BASE_PORT + (project_id % MAX_PROJECTS)
-    return port
+    """
+    Return the base port for a project. Project N gets ports [base, base + PORTS_PER_PROJECT - 1].
+    Project 1: 5151-5160, project 2: 5161-5170, etc. First port used by default.
+    """
+    block = (project_id - 1) % MAX_PROJECTS
+    return BASE_PORT + block * PORTS_PER_PROJECT
 
 
 def ensure_session(
@@ -44,9 +58,8 @@ def ensure_session(
     database_name: str | None = None,
 ) -> int:
     """
-    Ensure a FiftyOne session exists for the project. Returns the port.
-    For now, we only allocate the port; actual fo.launch_app() is done by sync worker.
-    database_name is resolved via get_database_name(project_id, database_name) if not provided.
+    Ensure a FiftyOne session exists for the project. Returns the base port (first in block).
+    fo.launch_app() is done by sync worker. database_name is resolved via get_database_name.
     """
     port = get_port_for_project(project_id)
     if project_id not in _sessions:

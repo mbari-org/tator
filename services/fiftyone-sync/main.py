@@ -200,10 +200,13 @@ async def sync(
     api_url: str = Query(..., description="Tator REST API base URL (e.g. https://tator.example.com)"),
     token: str = Query(..., description="Tator API token"),
     database_name: str | None = Query(None, description="Override MongoDB database name for this project"),
+    config_path: str | None = Query(None, description="Path to YAML/JSON config file for dataset build"),
+    launch_app: bool = Query(True, description="Launch FiftyOne app after sync"),
 ) -> dict:
     """
     Trigger sync: fetch Tator media + localizations, build FiftyOne dataset, launch App.
-    Requires fiftyone and tator packages. Returns port, status, and database_name.
+    Requires fiftyone and tator packages. Returns port, status, dataset_name, and database_name.
+    Config file may specify: dataset_name, include_classes, image_extensions, max_samples, delete_existing.
     """
     from sync import sync_project_to_fiftyone
     from port_manager import get_port_for_project
@@ -215,6 +218,8 @@ async def sync(
         token=token,
         port=port,
         database_name=database_name,
+        config_path=config_path,
+        launch_app=launch_app,
     )
     result["port"] = port
     return result

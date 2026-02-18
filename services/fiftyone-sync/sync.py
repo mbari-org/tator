@@ -1,19 +1,25 @@
 """
 Tator to FiftyOne sync: fetch media + localizations, build FiftyOne dataset, launch app.
-Phase 2 implementation. Requires fiftyone package and MongoDB.
+Phase 2 implementation. Requires fiftyone, tator, Pillow, PyYAML and MongoDB.
 """
 
 from __future__ import annotations
 
+import glob
 import json
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
-from port_manager import get_database_name, get_session
+import fiftyone as fo
+import tator
+import yaml
+from PIL import Image
+from port_manager import get_database_name, get_database_uri, get_port_for_project, get_session
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +54,6 @@ def fetch_project_media_ids(
     If media_ids_filter is set, only those media are returned (and must exist in the project).
     """
     print(f"[sync] fetch_project_media_ids: project_id={project_id} filter={media_ids_filter}", flush=True)
-    try:
-        import tator
-    except ImportError:
-        logger.warning("tator not installed; cannot fetch media")
-        print("[sync] tator not installed", flush=True)
-        return []
-
     host = api_url.rstrip("/")
     api = tator.get_api(host, token)
     if media_ids_filter:
@@ -73,10 +72,6 @@ def get_media_chunked(api: Any, project_id: int, media_ids: list[int]) -> list[A
     Filters out non-Media responses (API quirk). Returns list of tator.models.Media.
     """
     print(f"[sync] get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={CHUNK_SIZE}", flush=True)
-    try:
-        import tator
-    except ImportError:
-        return []
     if not media_ids:
         print("[sync] get_media_chunked: no ids, returning []", flush=True)
         return []
@@ -106,11 +101,6 @@ def save_media_to_tmp(api: Any, project_id: int, media_objects: list[Any]) -> st
     Videos are skipped (download not supported). Existing non-empty files are skipped.
     Retries each download up to 3 times. Returns the download directory path.
     """
-    try:
-        import tator
-    except ImportError:
-        logger.warning("tator not installed; cannot save media")
-        return ""
     base_dir = _project_tmp_dir(project_id)
     out_dir = os.path.join(base_dir, "download")
     os.makedirs(out_dir, exist_ok=True)
@@ -159,12 +149,6 @@ def fetch_and_save_localizations(
     Fetch all localizations in batches (after/stop pagination, Tator style) and write to a JSONL file.
     Returns path to the file (e.g. .../localizations.jsonl). Uses LOCALIZATION_BATCH_SIZE per batch.
     """
-    try:
-        import tator
-    except ImportError:
-        logger.warning("tator not installed; cannot fetch localizations")
-        print("[sync] tator not installed, localizations skipped", flush=True)
-        return ""
     base_dir = _project_tmp_dir(project_id)
     out_path = os.path.join(base_dir, "localizations.jsonl")
     print(f"[sync] Localizations JSONL will be saved to: {out_path}", flush=True)
@@ -225,11 +209,6 @@ def _crop_one(
     Tator box: x, y, width, height as normalized 0-1.
     """
     try:
-        from PIL import Image
-    except ImportError:
-        logger.warning("Pillow not installed; cannot crop")
-        return False
-    try:
         x = float(loc.get("x", 0))
         y = float(loc.get("y", 0))
         w = float(loc.get("width", 0))
@@ -283,11 +262,6 @@ def crop_localizations_parallel(
     """
     if not os.path.exists(download_dir) or not os.path.exists(localizations_jsonl_path):
         logger.warning("Download dir or localizations JSONL missing; skipping crops")
-        return (0, 0)
-    try:
-        from PIL import Image
-    except ImportError:
-        logger.warning("Pillow not installed; skipping crops")
         return (0, 0)
     download_path = Path(download_dir)
     crops_path = Path(crops_dir)
@@ -351,6 +325,142 @@ def crop_localizations_parallel(
     return (num_ok, num_fail)
 
 
+def _load_config(path: str) -> dict[str, Any]:
+    """Load configuration from YAML or JSON file."""
+    ext = os.path.splitext(path)[1].lower()
+    with open(path) as f:
+        if ext in (".yaml", ".yml"):
+            return yaml.safe_load(f) or {}
+        return json.load(f)
+
+
+def _sanitize_field_name(name: str) -> str:
+    """Convert to a valid FiftyOne field name."""
+    base = re.sub(r"[^a-zA-Z0-9]", "_", str(name))
+    base = re.sub(r"_+", "_", base).strip("_").lower()
+    return base or "unknown"
+
+
+def _load_localizations_index(jsonl_path: str) -> dict[str, dict]:
+    """Load localizations JSONL and index by elemental_id (or id)."""
+    index: dict[str, dict] = {}
+    with open(jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                loc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            eid = loc.get("elemental_id") or loc.get("id")
+            if eid is not None:
+                index[str(eid)] = loc
+    return index
+
+
+def _get_label_from_loc(loc: dict) -> str:
+    """Extract label from localization attributes (Label, label) or fallback."""
+    attrs = loc.get("attributes") or {}
+    label = attrs.get("Label") or attrs.get("label")
+    if label:
+        return str(label)
+    media_stem = None
+    media_id = loc.get("media")
+    if media_id is not None:
+        media_stem = str(media_id)
+    return media_stem or "unknown"
+
+
+def build_fiftyone_dataset_from_crops(
+    crops_dir: str,
+    localizations_jsonl_path: str,
+    dataset_name: str,
+    config: dict[str, Any] | None = None,
+    delete_existing: bool = True,
+) -> Any:
+    """
+    Build a FiftyOne dataset from crop images and localizations JSONL.
+
+    Crops layout: crops/{media_file_stem}/{elemental_id}.png
+    JSONL: one JSON per line with elemental_id, media, x, y, width, height, attributes, etc.
+
+    Config keys (optional):
+        include_classes: list of labels to include (None = all)
+        image_extensions: glob patterns (default: ["*.png", "*.jpg", ...])
+        max_samples: max samples to load (None = no limit)
+
+    Returns the FiftyOne dataset.
+    """
+    config = config or {}
+    include_classes = set(config.get("include_classes") or [])
+    image_extensions = config.get("image_extensions") or ["*.png", "*.jpg", "*.jpeg", "*.bmp", "*.tiff"]
+    max_samples = config.get("max_samples")
+
+    # Load localizations index by elemental_id
+    loc_index = _load_localizations_index(localizations_jsonl_path)
+    logger.info("Loaded %s localizations from JSONL", len(loc_index))
+    print(f"[sync] Loaded {len(loc_index)} localizations from JSONL", flush=True)
+
+    # Collect crop filepaths
+    samples: list = []
+    seen = 0
+    for ext in image_extensions:
+        pat = os.path.join(crops_dir, "**", ext)
+        for filepath in glob.glob(pat):
+            seen += 1
+            if max_samples and len(samples) >= max_samples:
+                break
+            rel = os.path.relpath(filepath, crops_dir)
+            parts = Path(rel).parts
+            if len(parts) < 2:
+                continue
+            media_stem = parts[0]
+            elemental_id = Path(filepath).stem
+
+            loc = loc_index.get(elemental_id)
+            label = _get_label_from_loc(loc) if loc else media_stem or "unknown"
+
+            if include_classes and label not in include_classes:
+                continue
+
+            sample = fo.Sample(filepath=os.path.abspath(filepath))
+            sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
+            sample["elemental_id"] = elemental_id
+            sample["media_stem"] = media_stem
+            sample.tags.append(label)
+            if loc:
+                attrs = loc.get("attributes") or {}
+                score = attrs.get("Score") or attrs.get("score") or loc.get("score")
+                if score is not None:
+                    sample["confidence"] = float(score)
+            samples.append(sample)
+        if max_samples and len(samples) >= max_samples:
+            break
+
+    if not samples:
+        raise ValueError(f"No crops found in {crops_dir} (checked {seen} files)")
+
+    print(f"[sync] Collected {len(samples)} samples for dataset", flush=True)
+
+    # Handle existing dataset
+    if dataset_name in fo.list_datasets():
+        if delete_existing:
+            fo.delete_dataset(dataset_name)
+            print(f"[sync] Deleted existing dataset: {dataset_name}", flush=True)
+        else:
+            dataset = fo.load_dataset(dataset_name)
+            dataset.add_samples(samples)
+            print(f"[sync] Added {len(samples)} samples to existing dataset", flush=True)
+            return dataset
+
+    dataset = fo.Dataset(dataset_name)
+    dataset.persistent = True
+    dataset.add_samples(samples)
+    print(f"[sync] Created dataset '{dataset_name}' with {len(samples)} samples", flush=True)
+    return dataset
+
+
 def sync_project_to_fiftyone(
     project_id: int,
     version_id: int | None,
@@ -358,6 +468,8 @@ def sync_project_to_fiftyone(
     token: str,
     port: int,
     database_name: str | None = None,
+    config_path: str | None = None,
+    launch_app: bool = True,
 ) -> dict[str, Any]:
     """
     Fetch Tator media and localizations, build FiftyOne dataset, launch App on given port.
@@ -365,28 +477,21 @@ def sync_project_to_fiftyone(
     Returns {"status": "ok", "dataset_name": str, "database_name": str} or raises.
     """
     print(f"[sync] sync_project_to_fiftyone CALLED: project_id={project_id} version_id={version_id} api_url={api_url} port={port}", flush=True)
-    try:
-        import fiftyone as fo
-    except ImportError:
-        logger.warning("fiftyone not installed; sync disabled")
-        print("[sync] fiftyone not installed, skipping", flush=True)
-        return {"status": "skipped", "message": "fiftyone not installed"}
-
     sess = get_session(project_id)
     resolved_db = (
         (database_name.strip() if database_name and database_name.strip() else None)
         or (sess.get("database_name") if sess else None)
         or get_database_name(project_id, None)
     )
+    fo.config.database_uri = get_database_uri()
     fo.config.database_name = resolved_db
-    print(f"[sync] database_name={resolved_db}", flush=True)
+    print(f"[sync] database_uri={fo.config.database_uri} database_name={resolved_db}", flush=True)
 
     media_ids_list: list[int] = []
     tmp_dir = ""
     localizations_path = ""
     crops_dir = ""
     try:
-        import tator
         host = api_url.rstrip("/")
         api = tator.get_api(host, token)
         print(f"[sync] Fetching media IDs...", flush=True)
@@ -416,15 +521,83 @@ def sync_project_to_fiftyone(
     except Exception as e:
         logger.exception("fetch/save media or localizations failed: %s", e)
         print(f"[sync] Error: {e}", flush=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "database_name": resolved_db,
+            "saved_media_dir": tmp_dir or None,
+            "saved_localizations_path": localizations_path or None,
+            "saved_crops_dir": crops_dir or None,
+        }
 
-    print(f"[sync] sync_project_to_fiftyone done: saved_media_dir={tmp_dir or None} saved_localizations_path={localizations_path or None} crops_dir={crops_dir or None}", flush=True)
+    if not crops_dir or not localizations_path:
+        print(f"[sync] No crops or localizations; skipping dataset build", flush=True)
+        return {
+            "status": "ok",
+            "message": "No crops to load; media/localizations missing or empty",
+            "database_name": resolved_db,
+            "dataset_name": None,
+            "saved_media_dir": tmp_dir or None,
+            "saved_localizations_path": localizations_path or None,
+            "saved_crops_dir": crops_dir or None,
+        }
+
+    # Load config from YAML/JSON if provided
+    config: dict[str, Any] = {}
+    if config_path and os.path.exists(config_path):
+        try:
+            config = _load_config(config_path)
+            print(f"[sync] Loaded config from {config_path}", flush=True)
+        except Exception as e:
+            logger.warning("Failed to load config %s: %s", config_path, e)
+            print(f"[sync] Config load failed: {e}", flush=True)
+
+    dataset_name = config.get("dataset_name") or f"tator_project_{project_id}"
+    delete_existing = config.get("delete_existing", True)
+
+    # If dataset exists, load it and skip rebuild (do not recreate)
+    if dataset_name in fo.list_datasets():
+        dataset = fo.load_dataset(dataset_name)
+        print(f"[sync] Using existing dataset '{dataset_name}' ({len(dataset)} samples)", flush=True)
+    else:
+        try:
+            dataset = build_fiftyone_dataset_from_crops(
+                crops_dir=crops_dir,
+                localizations_jsonl_path=localizations_path,
+                dataset_name=dataset_name,
+                config=config,
+                delete_existing=delete_existing,
+            )
+        except Exception as e:
+            logger.exception("Dataset build failed: %s", e)
+            print(f"[sync] Dataset build failed: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "database_name": resolved_db,
+                "dataset_name": None,
+                "saved_media_dir": tmp_dir or None,
+                "saved_localizations_path": localizations_path or None,
+                "saved_crops_dir": crops_dir or None,
+            }
+
+    # Set env so FiftyOne app subprocess uses the same database
+    os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+    os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+
+    print(f"[sync] sync_project_to_fiftyone done: dataset={dataset_name}", flush=True)
     logger.info(
-        "sync_project_to_fiftyone: project=%s port=%s database=%s",
-        project_id, port, resolved_db,
+        "sync_project_to_fiftyone: project=%s port=%s database=%s dataset=%s",
+        project_id, port, resolved_db, dataset_name,
     )
+
+    if launch_app:
+        print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
+        fo.launch_app(dataset, port=port)
+
     return {
-        "status": "stub",
-        "message": "Sync not yet implemented; install fiftyone and tator",
+        "status": "ok",
+        "dataset_name": dataset_name,
         "database_name": resolved_db,
         "saved_media_dir": tmp_dir or None,
         "saved_localizations_path": localizations_path or None,
@@ -450,7 +623,6 @@ def main() -> None:
 
     media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
     print("media_ids:", media_ids)
-    import tator
     api = tator.get_api(host, token)
     if media_ids:
         all_media = get_media_chunked(api, project_id, media_ids)
@@ -469,6 +641,31 @@ def main() -> None:
     crops_dir = os.path.join(base_dir, "crops")
     if os.path.isdir(download_dir) and localizations_path:
         crop_localizations_parallel(download_dir, localizations_path, crops_dir, size=224)
+
+    if crops_dir and localizations_path and os.path.isdir(crops_dir):
+        fo.config.database_uri = get_database_uri()
+        fo.config.database_name = get_database_name(project_id, None)
+        os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+        os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+        config_path = os.getenv("CONFIG_PATH")
+        config = _load_config(config_path) if config_path and os.path.exists(config_path) else {}
+        dataset_name = config.get("dataset_name") or f"tator_project_{project_id}"
+        if dataset_name in fo.list_datasets():
+            dataset = fo.load_dataset(dataset_name)
+            print(f"[sync] Using existing dataset '{dataset_name}' ({len(dataset)} samples)", flush=True)
+        else:
+            dataset = build_fiftyone_dataset_from_crops(
+                crops_dir=crops_dir,
+                localizations_jsonl_path=localizations_path,
+                dataset_name=dataset_name,
+                config=config,
+                delete_existing=True,
+            )
+        port = get_port_for_project(project_id)
+        print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
+        # fo.launch_app(dataset, port=port)
+        session = fo.launch_app(dataset, port=port)
+        print(f"[sync] Session: {session}", flush=True)
 
 
 if __name__ == "__main__":

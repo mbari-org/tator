@@ -21,7 +21,7 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
   - `GET /message` - Minimal template with single `{{ message }}` (for simple Hosted Template testing)
   - `GET /render` - Full Jinja2 template for FiftyOne viewer iframe (tparams: project, host, base_port, message)
   - `GET /launch` - Allocate port, return FiftyOne App URL
-  - `POST /sync` - Trigger Tator-to-FiftyOne sync (stub; requires fiftyone + tator)
+  - `POST /sync` - Trigger Tator-to-FiftyOne sync: fetch media + localizations, crop, build FiftyOne dataset, launch app (requires fiftyone + tator)
 
 ## Setup
 
@@ -101,16 +101,64 @@ The Hosted Template URL is **fetched by Tator’s backend** (gunicorn), not by t
   - From the host: `curl http://localhost:8001/message` should return HTML.
   - From inside the Tator/gunicorn container: the same URL you put in the Hosted Template (e.g. `http://host.docker.internal:8001/message`) must work (e.g. `curl` from that container).
 
-## MongoDB database (FiftyOne)
+## MongoDB (compose.yml)
 
-Each Tator project gets its own MongoDB database in FiftyOne for isolation unless overridden.
+Use `compose.yml` for a single MongoDB instance. Per-project isolation is by database name (`fiftyone_project_1`, `fiftyone_project_2`, etc.):
+
+```bash
+cd services/fiftyone-sync
+docker compose -f compose.yml up -d
+```
+
+Set `FIFTYONE_DATABASE_URI=mongodb://localhost:27017` (or override).
+
+## Database and port allocation
+
+Single MongoDB; each Tator project gets its own database for isolation. Up to 10 FiftyOne App ports are blocked per project for future multi-user expansion: project 1 → 5151-5160, project 2 → 5161-5170, etc. The first port in each block is used.
 
 | Env var | Purpose |
 |--------|---------|
-| `FIFTYONE_DATABASE_DEFAULT` | Prefix for per-project database names. Default `fiftyone_project` → databases `fiftyone_project_1`, `fiftyone_project_2`, etc. |
+| `FIFTYONE_DATABASE_URI` | MongoDB connection URI (default `mongodb://localhost:27017`). Override for remote/alternative MongoDB. |
+| `FIFTYONE_DATABASE_DEFAULT` | Prefix for per-project database names. Default `fiftyone_project` → `fiftyone_project_1`, `fiftyone_project_2`, etc. |
 | `FIFTYONE_DATABASE_NAME` | Override: use this single database name for all projects (ignores default pattern). |
 
-Optional query param **`database_name`** on `GET /launch` and `POST /sync` overrides the database for that project for the request (and for the session on `/launch`). Responses include `database_name` so clients know which DB is used.
+Optional query param **`database_name`** on `GET /launch` and `POST /sync` overrides the database for that project.
+
+## Sync and FiftyOne Dataset
+
+`POST /sync` fetches Tator media and localizations, crops bounding boxes, builds a FiftyOne dataset, and launches the FiftyOne app.
+
+### Query parameters
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `project_id` | yes | Tator project ID |
+| `api_url` | yes | Tator REST API base URL |
+| `token` | yes | Tator API token |
+| `version_id` | no | Version ID filter for localizations |
+| `database_name` | no | Override MongoDB database name |
+| `config_path` | no | Path to YAML/JSON config file for dataset build |
+| `launch_app` | no | Launch FiftyOne app after sync (default: true) |
+
+### Config file (YAML/JSON)
+
+Use `config_path` to pass a config file (e.g. `sample_config.yaml`):
+
+```yaml
+dataset_name: tator_project_dataset
+include_classes: [Larvacean, Copepod]   # optional: filter labels
+image_extensions: ["*.png", "*.jpg"]
+max_samples: 500                         # optional: limit for testing
+delete_existing: true
+```
+
+### Data layout
+
+- Media: `/tmp/fiftyone_sync_project_{id}/download/{media_id}_{name}.jpg`
+- Localizations: `/tmp/fiftyone_sync_project_{id}/localizations.jsonl` (JSONL)
+- Crops: `/tmp/fiftyone_sync_project_{id}/crops/{media_stem}/{elemental_id}.png`
+
+Labels come from `attributes.Label` (or `attributes.label`) in localizations.
 
 ## Embedding API Usage
 
