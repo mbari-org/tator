@@ -6,10 +6,14 @@ Phase 2 implementation. Requires fiftyone, tator, Pillow, PyYAML and MongoDB.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import logging
 import os
 import re
+import subprocess
+import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
@@ -21,9 +25,59 @@ import yaml
 from PIL import Image
 from port_manager import get_database_name, get_database_uri, get_port_for_project, get_session
 
-logger = logging.getLogger(__name__)
-
 CHUNK_SIZE = 200
+
+
+def _stop_process_on_port(port: int) -> None:
+    """
+    Try to stop any process listening on the given port so that launch_app
+    starts a fresh FiftyOne server with the newly synced dataset. If an old
+    server is left running, FiftyOne connects to it and never loads our dataset.
+    """
+    if sys.platform not in ("darwin", "linux", "linux2"):
+        return
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if out.returncode != 0 or not out.stdout or not out.stdout.strip():
+            return
+        pids = [p.strip() for p in out.stdout.strip().split() if p.strip()]
+        for pid in pids:
+            try:
+                subprocess.run(["kill", "-TERM", pid], capture_output=True, timeout=2)
+            except Exception:
+                pass
+        if pids:
+            time.sleep(1.5)
+            print(f"[sync] Stopped existing process(es) on port {port} (PIDs: {pids})", flush=True)
+    except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
+        logging.getLogger(__name__).debug("Could not stop process on port %s: %s", port, e)
+
+
+def _launch_app_embedded(dataset: fo.Dataset, port: int):
+    """
+    Launch FiftyOne app for embedded/iframe use (no browser tab, no SSH instructions).
+    Uses remote=True so FiftyOne does not open a browser; we suppress FiftyOne's
+    SSH port-forwarding message and print a short note for the Tator dashboard instead.
+    See https://docs.voxel51.com/installation/environments.html#remote-data
+    """
+    fo_session_logger = logging.getLogger("fiftyone.core.session.session")
+    old_level = fo_session_logger.level
+    fo_session_logger.setLevel(logging.WARNING)
+    try:
+        session = fo.launch_app(dataset, port=port, address="0.0.0.0", remote=True)
+    finally:
+        fo_session_logger.setLevel(old_level)
+    print(
+        f"[sync] FiftyOne app is running on port {port}. "
+        "Open it in the Tator dashboard iframe (or at http://<host>:{port})".format(port=port),
+        flush=True,
+    )
+    return session
 LOCALIZATION_BATCH_SIZE = 5000
 
 
@@ -62,7 +116,7 @@ def fetch_project_media_ids(
         media_list = api.get_media_list(project_id)
     media_ids = [m.id for m in media_list]
     print(f"[sync] fetch_project_media_ids: got {len(media_ids)} ids", flush=True)
-    logger.info("Project %s media count: %s; ids: %s", project_id, len(media_ids), media_ids)
+    print("Project %s media count: %s; ids: %s", project_id, len(media_ids), media_ids)
     return media_ids
 
 
@@ -83,7 +137,7 @@ def get_media_chunked(api: Any, project_id: int, media_ids: list[int]) -> list[A
         all_media += new_media
         print(f"[sync] get_media_chunked: start={start} chunk_len={len(new_media)} total_media={len(all_media)}", flush=True)
     print(f"[sync] get_media_chunked: done, {len(all_media)} Media objects", flush=True)
-    logger.info("get_media_chunked: %s ids -> %s Media objects", len(media_ids), len(all_media))
+    print("get_media_chunked: %s ids -> %s Media objects", len(media_ids), len(all_media))
     return all_media
 
 
@@ -106,18 +160,18 @@ def save_media_to_tmp(api: Any, project_id: int, media_objects: list[Any]) -> st
     os.makedirs(out_dir, exist_ok=True)
     valid = [m for m in media_objects if isinstance(m, tator.models.Media)]
     total = len(valid)
-    logger.info("Saving %s media files to %s", total, out_dir)
+    print("Saving %s media files to %s", total, out_dir)
     print(f"[sync] Saving {total} media files to {out_dir}", flush=True)
     for idx, m in enumerate(valid, 1):
         safe_name = f"{m.id}_{m.name}"
         out_path = os.path.join(out_dir, safe_name)
         if _is_video_name(m.name):
             print(f"[sync] Skipping video (not supported): {safe_name}", flush=True)
-            logger.info("Skipping video %s", m.id)
+            print("Skipping video %s", m.id)
             continue
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
             print(f"[sync] Skipping existing: {safe_name}", flush=True)
-            logger.debug("Skipping existing %s", out_path)
+            print("Skipping existing %s", out_path)
             continue
         print(f"[sync] Downloading {m.name} to {out_path}", flush=True)
         num_tries = 0
@@ -127,15 +181,15 @@ def save_media_to_tmp(api: Any, project_id: int, media_objects: list[Any]) -> st
                 for _ in tator.util.download_media(api, m, out_path):
                     pass
                 success = True
-                logger.info("Saved %s -> %s", m.id, out_path)
+                print("Saved %s -> %s", m.id, out_path)
                 print(f"[sync] Saved media {m.id} -> {out_path}", flush=True)
             except Exception as e:
-                logger.warning("Download attempt %s/3 failed for media %s: %s", num_tries + 1, m.id, e)
+                print(f"[sync] Download attempt {num_tries + 1}/3 failed for {m.id}: {e}", flush=True)
                 print(f"[sync] Attempt {num_tries + 1}/3 failed for {m.id}: {e}", flush=True)
                 num_tries += 1
         if not success:
             print(f"[sync] Could not download {m.name} after 3 tries", flush=True)
-    logger.info("Saved media files to %s", out_dir)
+    print("Saved media files to %s", out_dir)
     print(f"[sync] Done. Files in {out_dir}", flush=True)
     return out_dir
 
@@ -146,7 +200,9 @@ def fetch_and_save_localizations(
     version_id: int | None = None,
 ) -> str:
     """
-    Fetch all localizations in batches (after/stop pagination, Tator style) and write to a JSONL file.
+    Fetch all current localizations from Tator and write to a JSONL file.
+    Overwrites the file (mode "w"), so the JSONL is always reconciled with Tator:
+    removed localizations are absent, and the file is the single source of truth for the sync.
     Returns path to the file (e.g. .../localizations.jsonl). Uses LOCALIZATION_BATCH_SIZE per batch.
     """
     base_dir = _project_tmp_dir(project_id)
@@ -176,7 +232,7 @@ def fetch_and_save_localizations(
                 batch = api.get_localization_list(project_id, **kwargs)
             except Exception as e:
                 print(f"[sync] get_localization_list failed: {e}", flush=True)
-                logger.exception("get_localization_list failed")
+                print("get_localization_list failed", flush=True)
                 break
             if not batch:
                 print(f"[sync] Localizations batch empty (after={after_id}), done", flush=True)
@@ -186,14 +242,14 @@ def fetch_and_save_localizations(
                     obj = loc.to_dict() if hasattr(loc, "to_dict") else loc
                     f.write(json.dumps(obj, default=_json_serial) + "\n")
                 except Exception as e:
-                    logger.warning("Skip localization serialization: %s", e)
+                    print("Skip localization serialization: %s", e)
                     continue
             total += len(batch)
             after_id = batch[-1].id if batch else None
             print(f"[sync] Localizations batch: count={len(batch)} total_so_far={total} last_id={after_id}", flush=True)
             if len(batch) < batch_size:
                 break
-    logger.info("Fetched %s localizations -> %s", total, out_path)
+    print("Fetched %s localizations -> %s", total, out_path)
     print(f"[sync] Localizations JSONL saved to: {out_path} ({total} rows)", flush=True)
     return out_path
 
@@ -245,7 +301,7 @@ def _crop_one(
         resized.save(out_path)
         return True
     except Exception as e:
-        logger.warning("Crop failed for %s: %s", out_path.stem, e)
+        print("Crop failed for %s: %s", out_path.stem, e)
         return False
 
 
@@ -261,7 +317,7 @@ def crop_localizations_parallel(
     Returns (num_cropped, num_failed).
     """
     if not os.path.exists(download_dir) or not os.path.exists(localizations_jsonl_path):
-        logger.warning("Download dir or localizations JSONL missing; skipping crops")
+        print("Download dir or localizations JSONL missing; skipping crops")
         return (0, 0)
     download_path = Path(download_dir)
     crops_path = Path(crops_dir)
@@ -316,7 +372,7 @@ def crop_localizations_parallel(
         for fut in as_completed(futures):
             if fut.exception():
                 num_fail += 1
-                logger.warning("Crop task failed: %s", fut.exception())
+                print("Crop task failed: %s", fut.exception())
             elif fut.result():
                 num_ok += 1
             else:
@@ -359,6 +415,152 @@ def _load_localizations_index(jsonl_path: str) -> dict[str, dict]:
     return index
 
 
+def _box_hash(loc: dict | None) -> str:
+    """Hash of bounding box (x, y, width, height) for detecting box changes."""
+    if not loc:
+        return ""
+    x = loc.get("x")
+    y = loc.get("y")
+    w = loc.get("width")
+    h = loc.get("height")
+    return hashlib.sha256(
+        f"{x}|{y}|{w}|{h}".encode()
+    ).hexdigest()
+
+
+def _content_hash(label: Any, confidence: Any) -> str:
+    """Hash of label+confidence for sync dedup. Must match sync_edits_to_tator."""
+    return hashlib.sha256(
+        f"{label}|{float(confidence) if confidence is not None else ''}".encode()
+    ).hexdigest()
+
+
+def _media_id_to_stem(download_dir: str) -> dict[int, str]:
+    """Map media_id -> file stem for crop path resolution (e.g. 123 -> '123_image')."""
+    out: dict[int, str] = {}
+    if not download_dir or not os.path.exists(download_dir):
+        return out
+    for f in Path(download_dir).iterdir():
+        if f.is_file() and f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp", ".bmp"):
+            stem = f.stem
+            if "_" in stem:
+                try:
+                    mid = int(stem.split("_", 1)[0])
+                    out[mid] = stem
+                except ValueError:
+                    pass
+    return out
+
+
+def _create_sample_from_loc(
+    loc: dict,
+    crops_dir: str,
+    media_stem: str,
+    include_classes: set[str],
+) -> fo.Sample | None:
+    """Create a FiftyOne sample from a localization (for reconcile add-new)."""
+    elemental_id = loc.get("elemental_id") or loc.get("id")
+    if elemental_id is None:
+        return None
+    elemental_id = str(elemental_id)
+    label = _get_label_from_loc(loc)
+    if include_classes and label not in include_classes:
+        return None
+    filepath = os.path.abspath(os.path.join(crops_dir, media_stem, f"{elemental_id}.png"))
+    if not os.path.exists(filepath):
+        return None
+    sample = fo.Sample(filepath=filepath)
+    sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
+    sample["elemental_id"] = elemental_id
+    sample["media_stem"] = media_stem
+    sample["box_hash"] = _box_hash(loc)
+    sample.tags.append(label)
+    attrs = loc.get("attributes") or {}
+    score = attrs.get("Score") or attrs.get("score")
+    if score is not None:
+        sample["confidence"] = float(score)
+    conf = sample["confidence"] if "confidence" in sample else 1.0
+    sample["last_sync_hash"] = _content_hash(label, conf)
+    return sample
+
+
+def reconcile_dataset_with_tator(
+    dataset: fo.Dataset,
+    loc_index: dict[str, dict],
+    crops_dir: str,
+    download_dir: str | None,
+    config: dict[str, Any],
+    image_extensions: list[str],
+    max_samples: int | None,
+) -> fo.Dataset:
+    """
+    Reconcile existing dataset with current Tator localizations:
+    - Remove samples whose elemental_id was deleted in Tator
+    - Update samples whose bounding box changed (crop file already overwritten)
+    - Add samples for new elemental_ids in Tator
+    """
+    tator_eids = set(loc_index.keys())
+    include_classes = set(config.get("include_classes") or [])
+    media_id_to_stem = _media_id_to_stem(download_dir) if download_dir else {}
+
+    # 1. Remove samples deleted in Tator (only when we have a non-empty localization set from Tator)
+    # If Tator returns 0 localizations (e.g. wrong version or API filter), do not remove existing samples
+    if tator_eids:
+        to_remove = []
+        for s in dataset:
+            eid = s["elemental_id"] if "elemental_id" in s else None
+            if eid is not None and str(eid) not in tator_eids:
+                to_remove.append(s.id)
+        if to_remove:
+            dataset.delete_samples(to_remove)
+            print(f"[sync] Reconcile: removed {len(to_remove)} samples (deleted in Tator)", flush=True)
+    else:
+        print(f"[sync] Reconcile: 0 localizations from Tator; skipping delete step (keeping existing samples)", flush=True)
+
+    # 2. Update samples with changed box (crop already overwritten by crop_localizations_parallel)
+    updated = 0
+    for sample in dataset.iter_samples(autosave=False):
+        elemental_id = sample["elemental_id"] if "elemental_id" in sample else None
+        if not elemental_id or str(elemental_id) not in loc_index:
+            continue
+        loc = loc_index[str(elemental_id)]
+        new_hash = _box_hash(loc)
+        old_hash = sample["box_hash"] if "box_hash" in sample else None
+        if old_hash != new_hash:
+            sample["box_hash"] = new_hash
+            sample.save()
+            updated += 1
+    if updated:
+        print(f"[sync] Reconcile: updated {updated} samples (box changed)", flush=True)
+
+    # 3. Add new samples (elemental_id in Tator but not in dataset)
+    dataset_eids = {str(s["elemental_id"]) for s in dataset if "elemental_id" in s}
+    new_eids = [eid for eid in tator_eids if eid not in dataset_eids]
+    if max_samples:
+        cap = max_samples - len(dataset)
+        if cap <= 0:
+            new_eids = []
+        else:
+            new_eids = new_eids[:cap]
+    added = 0
+    for eid in new_eids:
+        loc = loc_index[eid]
+        media_id = loc.get("media")
+        if media_id is None:
+            continue
+        media_stem = media_id_to_stem.get(int(media_id))
+        if not media_stem:
+            continue
+        sample = _create_sample_from_loc(loc, crops_dir, media_stem, include_classes)
+        if sample:
+            dataset.add_samples([sample])
+            added += 1
+    if added:
+        print(f"[sync] Reconcile: added {added} new samples", flush=True)
+
+    return dataset
+
+
 def _get_label_from_loc(loc: dict) -> str:
     """Extract label from localization attributes (Label, label) or fallback."""
     attrs = loc.get("attributes") or {}
@@ -377,7 +579,7 @@ def build_fiftyone_dataset_from_crops(
     localizations_jsonl_path: str,
     dataset_name: str,
     config: dict[str, Any] | None = None,
-    delete_existing: bool = True,
+    download_dir: str | None = None,
 ) -> Any:
     """
     Build a FiftyOne dataset from crop images and localizations JSONL.
@@ -399,7 +601,7 @@ def build_fiftyone_dataset_from_crops(
 
     # Load localizations index by elemental_id
     loc_index = _load_localizations_index(localizations_jsonl_path)
-    logger.info("Loaded %s localizations from JSONL", len(loc_index))
+    print("Loaded %s localizations from JSONL", len(loc_index))
     print(f"[sync] Loaded {len(loc_index)} localizations from JSONL", flush=True)
 
     # Collect crop filepaths
@@ -428,12 +630,15 @@ def build_fiftyone_dataset_from_crops(
             sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
             sample["elemental_id"] = elemental_id
             sample["media_stem"] = media_stem
+            sample["box_hash"] = _box_hash(loc)
             sample.tags.append(label)
             if loc:
                 attrs = loc.get("attributes") or {}
-                score = attrs.get("Score") or attrs.get("score") or loc.get("score")
+                score = attrs.get("Score") or attrs.get("score")
                 if score is not None:
                     sample["confidence"] = float(score)
+            conf = sample["confidence"] if "confidence" in sample else 1.0
+            sample["last_sync_hash"] = _content_hash(label, conf)
             samples.append(sample)
         if max_samples and len(samples) >= max_samples:
             break
@@ -443,22 +648,124 @@ def build_fiftyone_dataset_from_crops(
 
     print(f"[sync] Collected {len(samples)} samples for dataset", flush=True)
 
-    # Handle existing dataset
+    # Handle existing dataset: always reconcile, never delete
     if dataset_name in fo.list_datasets():
-        if delete_existing:
-            fo.delete_dataset(dataset_name)
-            print(f"[sync] Deleted existing dataset: {dataset_name}", flush=True)
-        else:
-            dataset = fo.load_dataset(dataset_name)
-            dataset.add_samples(samples)
-            print(f"[sync] Added {len(samples)} samples to existing dataset", flush=True)
-            return dataset
+        print(f"[sync] --------->Reconcile: loading dataset {dataset_name}", flush=True)
+        dataset = fo.load_dataset(dataset_name)
+        dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
+        dataset = reconcile_dataset_with_tator(
+            dataset=dataset,
+            loc_index=loc_index,
+            crops_dir=crops_dir,
+            download_dir=download_dir,
+            config=config,
+            image_extensions=image_extensions,
+            max_samples=max_samples,
+        )
+        print(f"[sync] --------->Reconcile: dataset {dataset_name} loaded", flush=True)
+        return dataset
 
+    print(f"[sync] --------->Reconcile: creating new dataset {dataset_name}", flush=True)
     dataset = fo.Dataset(dataset_name)
-    dataset.persistent = True
+    dataset.persistent = True  # Persist dataset in MongoDB after session ends
     dataset.add_samples(samples)
     print(f"[sync] Created dataset '{dataset_name}' with {len(samples)} samples", flush=True)
     return dataset
+
+
+DEFAULT_LABEL_ATTR = "Label"
+DEFAULT_SCORE_ATTR = "score"
+
+
+def sync_edits_to_tator(
+    project_id: int,
+    version_id: int,
+    api_url: str,
+    token: str,
+    dataset_name: str | None = None,
+    database_name: str | None = None,
+    label_attr: str | None = DEFAULT_LABEL_ATTR,
+    score_attr: str | None = DEFAULT_SCORE_ATTR,
+    debug: bool = False,
+) -> dict[str, Any]:
+    """
+    Push FiftyOne dataset edits (labels, confidence) back to Tator localizations.
+    Uses elemental_id to match samples to Tator localizations; updates attributes
+    via update_localization_by_elemental_id.
+    Returns {"status": "ok", "updated": int, "failed": int, "errors": list} or raises.
+    """
+    fo.config.database_uri = get_database_uri()
+    resolved_db = database_name or get_database_name(project_id, None)
+    fo.config.database_name = resolved_db
+    os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+    os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+
+    ds_name = dataset_name or f"tator_project_{project_id}"
+    fallback_db = f"{os.environ.get('FIFTYONE_DATABASE_DEFAULT', 'fiftyone_project')}_{project_id}"
+    if ds_name not in fo.list_datasets():
+        if resolved_db != fallback_db:
+            fo.config.database_name = fallback_db
+            os.environ["FIFTYONE_DATABASE_NAME"] = fallback_db
+        if ds_name not in fo.list_datasets():
+            fo.config.database_name = resolved_db
+            raise ValueError(
+                f"Dataset '{ds_name}' not found in database '{resolved_db}' (or '{fallback_db}'). "
+                "Run POST /sync first. Ensure FIFTYONE_DATABASE_URI and FIFTYONE_DATABASE_NAME match the sync process."
+            )
+
+    dataset = fo.load_dataset(ds_name)
+    host = api_url.rstrip("/")
+    api = tator.get_api(host, token)
+
+    updated = 0
+    failed = 0
+    skipped = 0
+    errors: list[str] = []
+    _debug = debug or os.environ.get("FIFTYONE_SYNC_DEBUG", "").lower() in ("1", "true", "yes")
+
+    for sample in dataset.iter_samples(autosave=False):
+        elemental_id = sample["elemental_id"] if "elemental_id" in sample else None
+        if not elemental_id:
+            failed += 1
+            errors.append(f"Sample {sample.id}: missing elemental_id")
+            continue
+        gt = sample["ground_truth"] if "ground_truth" in sample else None
+        label = gt.label if gt else None
+        confidence = sample["confidence"] if "confidence" in sample else None
+        if confidence is None and gt:
+            confidence = getattr(gt, "confidence", None)
+        attrs: dict[str, Any] = {}
+        if label is not None and label_attr:
+            attrs[label_attr] = str(label)
+        if confidence is not None and score_attr:
+            attrs[score_attr] = float(confidence)
+        if not attrs:
+            continue
+        # Content-based skip: only push if label/confidence changed since last sync.
+        # Build sets last_sync_hash from Tator; first sync skips all if no user edits.
+        current_hash = _content_hash(label, confidence)
+        last_sync_hash = sample["last_sync_hash"] if "last_sync_hash" in sample else None
+        if current_hash == last_sync_hash:
+            skipped += 1
+            if _debug:
+                print(f"[sync] SKIP elem={elemental_id} hash={current_hash[:8]}", flush=True)
+            continue
+        try:
+            api.update_localization_by_elemental_id(
+                version_id, str(elemental_id), localization_update={"attributes": attrs}
+            )
+            sample["last_sync_hash"] = current_hash
+            sample.save()
+            updated += 1
+            if _debug:
+                print(f"[sync] UPDATE elem={elemental_id}", flush=True)
+        except Exception as e:
+            failed += 1
+            errors.append(f"{elemental_id}: {e}")
+            print("Failed to update localization %s: %s", elemental_id, e)
+
+    print(f"[sync] sync_edits_to_tator: updated={updated} skipped={skipped} failed={failed}", flush=True)
+    return {"status": "ok", "updated": updated, "skipped": skipped, "failed": failed, "errors": errors[:20]}
 
 
 def sync_project_to_fiftyone(
@@ -494,18 +801,18 @@ def sync_project_to_fiftyone(
     try:
         host = api_url.rstrip("/")
         api = tator.get_api(host, token)
-        print(f"[sync] Fetching media IDs...", flush=True)
+        print(f"[sync] Fetching media IDs... {host} {token} {project_id} {api_url}", flush=True)
         media_ids_list = fetch_project_media_ids(api_url, token, project_id)
         if not media_ids_list:
             print(f"[sync] No media IDs for project {project_id}", flush=True)
-            logger.warning("No media IDs found for project %s; skipping download", project_id)
+            print("No media IDs found for project %s; skipping download", project_id)
         else:
             print("media_ids:", media_ids_list, flush=True)
             print(f"[sync] Getting media objects in chunks...", flush=True)
             all_media = get_media_chunked(api, project_id, media_ids_list)
             if not all_media:
                 print(f"[sync] No Media objects for {len(media_ids_list)} ids", flush=True)
-                logger.warning("No Media objects returned for %s ids; skipping download", len(media_ids_list))
+                print("No Media objects returned for %s ids; skipping download", len(media_ids_list))
             else:
                 print(f"[sync] Saving {len(all_media)} media to tmp...", flush=True)
                 tmp_dir = save_media_to_tmp(api, project_id, all_media)
@@ -519,7 +826,7 @@ def sync_project_to_fiftyone(
             crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
             crop_localizations_parallel(tmp_dir, localizations_path, crops_dir, size=224)
     except Exception as e:
-        logger.exception("fetch/save media or localizations failed: %s", e)
+        print("fetch/save media or localizations failed: %s", e)
         print(f"[sync] Error: {e}", flush=True)
         return {
             "status": "error",
@@ -549,56 +856,74 @@ def sync_project_to_fiftyone(
             config = _load_config(config_path)
             print(f"[sync] Loaded config from {config_path}", flush=True)
         except Exception as e:
-            logger.warning("Failed to load config %s: %s", config_path, e)
+            print("Failed to load config %s: %s", config_path, e)
             print(f"[sync] Config load failed: {e}", flush=True)
 
-    dataset_name = config.get("dataset_name") or f"tator_project_{project_id}"
-    delete_existing = config.get("delete_existing", True)
-
-    # If dataset exists, load it and skip rebuild (do not recreate)
-    if dataset_name in fo.list_datasets():
-        dataset = fo.load_dataset(dataset_name)
-        print(f"[sync] Using existing dataset '{dataset_name}' ({len(dataset)} samples)", flush=True)
-    else:
-        try:
-            dataset = build_fiftyone_dataset_from_crops(
-                crops_dir=crops_dir,
-                localizations_jsonl_path=localizations_path,
-                dataset_name=dataset_name,
-                config=config,
-                delete_existing=delete_existing,
-            )
-        except Exception as e:
-            logger.exception("Dataset build failed: %s", e)
-            print(f"[sync] Dataset build failed: {e}", flush=True)
-            return {
-                "status": "error",
-                "message": str(e),
-                "database_name": resolved_db,
-                "dataset_name": None,
-                "saved_media_dir": tmp_dir or None,
-                "saved_localizations_path": localizations_path or None,
-                "saved_crops_dir": crops_dir or None,
-            }
+    dataset_name = config.get("dataset_name") or f"tator_project_{project_id}" 
 
     # Set env so FiftyOne app subprocess uses the same database
     os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
     os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
+    try:
+        print(f"[sync] --------->Building dataset {dataset_name}", flush=True)
+        dataset = build_fiftyone_dataset_from_crops(
+            crops_dir=crops_dir,
+            localizations_jsonl_path=localizations_path,
+            dataset_name=dataset_name,
+            config=config,
+            download_dir=tmp_dir or None,
+        )
+    except Exception as e:
+        print("Dataset build failed: %s", e)
+        print(f"[sync] Dataset build failed: {e}", flush=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "database_name": resolved_db,
+            "dataset_name": None,
+            "saved_media_dir": tmp_dir or None,
+            "saved_localizations_path": localizations_path or None,
+            "saved_crops_dir": crops_dir or None,
+        }
+
     print(f"[sync] sync_project_to_fiftyone done: dataset={dataset_name}", flush=True)
-    logger.info(
+    print(
         "sync_project_to_fiftyone: project=%s port=%s database=%s dataset=%s",
         project_id, port, resolved_db, dataset_name,
     )
 
+    sample_count = len(dataset)
+    print(f"[sync] Dataset '{dataset_name}' has {sample_count} samples", flush=True)
+
     if launch_app:
+        # Reload dataset from MongoDB so the server (which loads from DB) sees the same state
+        try:
+            dataset.reload()
+            sample_count = len(dataset)
+            print(f"[sync] Reloaded dataset from DB: {sample_count} samples", flush=True)
+        except Exception as e:
+            logging.getLogger(__name__).debug("Dataset reload before launch: %s", e)
         print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
-        fo.launch_app(dataset, port=port)
+        # _stop_process_on_port(port)
+        session = _launch_app_embedded(dataset, port)
+        # Push state immediately so the server has the correct dataset
+        try:
+            session.refresh()
+        except Exception as e:
+            logging.getLogger(__name__).debug("Session refresh after launch: %s", e)
+        # Give the FiftyOne server time to start and accept state before the browser connects
+        time.sleep(10)
+        try:
+            session.refresh()
+        except Exception as e:
+            logging.getLogger(__name__).debug("Session refresh (delayed): %s", e)
 
     return {
         "status": "ok",
         "dataset_name": dataset_name,
         "database_name": resolved_db,
+        "sample_count": sample_count,
         "saved_media_dir": tmp_dir or None,
         "saved_localizations_path": localizations_path or None,
         "saved_crops_dir": crops_dir or None,
@@ -650,21 +975,17 @@ def main() -> None:
         config_path = os.getenv("CONFIG_PATH")
         config = _load_config(config_path) if config_path and os.path.exists(config_path) else {}
         dataset_name = config.get("dataset_name") or f"tator_project_{project_id}"
-        if dataset_name in fo.list_datasets():
-            dataset = fo.load_dataset(dataset_name)
-            print(f"[sync] Using existing dataset '{dataset_name}' ({len(dataset)} samples)", flush=True)
-        else:
-            dataset = build_fiftyone_dataset_from_crops(
-                crops_dir=crops_dir,
-                localizations_jsonl_path=localizations_path,
-                dataset_name=dataset_name,
-                config=config,
-                delete_existing=True,
-            )
+        dataset = build_fiftyone_dataset_from_crops(
+            crops_dir=crops_dir,
+            localizations_jsonl_path=localizations_path,
+            dataset_name=dataset_name,
+            config=config,
+            download_dir=download_dir,
+        )
         port = get_port_for_project(project_id)
         print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
-        # fo.launch_app(dataset, port=port)
-        session = fo.launch_app(dataset, port=port)
+        _stop_process_on_port(port)
+        session = _launch_app_embedded(dataset, port)
         print(f"[sync] Session: {session}", flush=True)
 
 

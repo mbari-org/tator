@@ -9,6 +9,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -23,6 +24,13 @@ app = FastAPI(
     title="FiftyOne Sync Service",
     description="Embedding API and FiftyOne launcher for Tator dashboards",
     version="0.1.0",
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 router = APIRouter(tags=["embedding"])
@@ -73,7 +81,9 @@ async def get_embed(job_id: str) -> dict:
 # Jinja2 template for Tator Hosted Template (applet/dashboard).
 # See: https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates
 # Required tparams: project (int, Tator project ID).
-# Optional: iframe_host, base_port, message, config_yaml (YAML config string for FiftyOne).
+# Optional: iframe_host, base_port (5151), ports_per_project (10, must match port_manager).
+# For "Sync from Tator" button: sync_service_url, api_url, token; optional version_id, database_name.
+# FiftyOne opens in a new window/tab (Open FiftyOne button); no iframe.
 LAUNCHER_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -83,55 +93,89 @@ LAUNCHER_TEMPLATE = """
   <title>FiftyOne Viewer – Project {{ project }}</title>
   <style>
     * { box-sizing: border-box; }
-    html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; background: #1a1a1a; color: #e0e0e0; }
-    .applet-header { padding: 0.75rem 1rem; background: #2a2a2a; border-bottom: 1px solid #444; font-size: 0.875rem; }
+    html, body { margin: 0; min-height: 100%; font-family: system-ui, sans-serif; background: #1a1a1a; color: #e0e0e0; padding: 1rem; }
+    .applet-header { padding: 0.75rem 0; font-size: 0.875rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; }
     .applet-header p { margin: 0; }
     .applet-header .config-yaml { margin-top: 0.5rem; font-size: 0.75rem; color: #999; white-space: pre-wrap; word-break: break-all; max-height: 6em; overflow: auto; }
-    .applet-iframe { display: block; width: 100%; height: calc(100% - 48px); border: none; }
+    .applet-header .sync-status { font-size: 0.8rem; color: #9c9; }
+    .applet-header .sync-status.error { color: #c99; }
+    .applet-header button { padding: 0.35rem 0.75rem; cursor: pointer; background: #3a7bd5; color: #fff; border: none; border-radius: 4px; font-size: 0.8rem; }
+    .applet-header button:hover { background: #2d6ac4; }
+    .applet-header button:disabled { opacity: 0.6; cursor: not-allowed; }
   </style>
 </head>
 <body>
   <div class="applet-header">
-    {% if message %}
-    <p>{{ message }}</p>
-    {% else %}
-    <p>Voxel51 FiftyOne viewer – Project {{ project }} (port {{ (base_port | default(5151) | int) + (project | int) }})</p>
-    {% endif %}
-    {% if config_yaml %}
-    <div id="config-yaml-data" class="config-yaml" title="config_yaml" data-config="{{ config_yaml | e }}">{{ config_yaml }}</div>
+    <div>
+      {% if message %}
+      <p>{{ message }}</p>
+      {% else %}
+      <p>Voxel51 FiftyOne viewer – Project {{ project }} (port {{ (base_port | default(5151) | int) + ((project | int) - 1) * (ports_per_project | default(10) | int) }})</p>
+      {% endif %}
+      {% if config_yaml %}
+      <div id="config-yaml-data" class="config-yaml" title="config_yaml" data-config="{{ config_yaml | e }}">{{ config_yaml }}</div>
+      {% endif %}
+    </div>
+    <button type="button" id="open-fiftyone-btn">Open FiftyOne</button>
+    {% if sync_service_url and api_url and token %}
+    <button type="button" id="sync-from-tator-btn">Sync from Tator</button>
+    <span id="sync-status" class="sync-status" aria-live="polite"></span>
     {% endif %}
   </div>
-  <iframe
-    id="fiftyone-iframe"
-    class="applet-iframe"
-    src="http://{{ iframe_host | default('localhost') }}:{{ (base_port | default(5151) | int) + (project | int) }}/"
-    title="FiftyOne App">
-  </iframe>
   <script>
     (function() {
       var project = parseInt("{{ project }}", 10) || 0;
       var iframeHost = "{{ (iframe_host | default('localhost')) }}";
       var basePort = {{ (base_port | default(5151)) | int }};
-      var port = basePort + project;
-      var iframeSrc = 'http://' + iframeHost + ':' + port + '/';
+      var portsPerProject = {{ (ports_per_project | default(10)) | int }};
+      var port = basePort + (project - 1) * portsPerProject;
+      var appUrl = 'http://' + iframeHost + ':' + port + '/';
       var configYamlEl = document.getElementById('config-yaml-data');
       var configYaml = configYamlEl ? (configYamlEl.getAttribute('data-config') || '') : '';
       if (configYaml) window.FIFTYONE_CONFIG_YAML = configYaml;
-      console.log('[FiftyOne Dashboard] Launcher loaded', {
-        project: project,
-        iframe_host: iframeHost,
-        base_port: basePort,
-        port: port,
-        iframe_src: iframeSrc,
-        has_config_yaml: !!configYaml
-      });
-      var iframe = document.getElementById('fiftyone-iframe');
-      if (iframe) {
-        iframe.addEventListener('load', function() {
-          console.log('[FiftyOne Dashboard] Iframe loaded successfully:', iframeSrc);
-        });
-        iframe.addEventListener('error', function() {
-          console.warn('[FiftyOne Dashboard] Iframe failed to load (e.g. connection refused):', iframeSrc);
+      var openBtn = document.getElementById('open-fiftyone-btn');
+      if (openBtn) openBtn.addEventListener('click', function() { window.open(appUrl, '_blank'); });
+      var syncServiceUrl = "{{ (sync_service_url | default('') | e) }}".replace(/\/$/, '');
+      var apiUrl = "{{ api_url | default('') | e }}";
+      var token = "{{ token | default('') | e }}";
+      var versionId = "{{ version_id | default('') | e }}";
+      var databaseName = "{{ database_name | default('') | e }}" || ('fiftyone_project_' + project);
+      var syncBtn = document.getElementById('sync-from-tator-btn');
+      var syncStatus = document.getElementById('sync-status');
+      if (syncBtn && syncStatus && syncServiceUrl && apiUrl && token) {
+        syncBtn.addEventListener('click', function() {
+          syncBtn.disabled = true;
+          syncStatus.textContent = 'Syncing…';
+          syncStatus.classList.remove('error');
+          var params = new URLSearchParams({ project_id: String(project), api_url: apiUrl, token: token, launch_app: 'true', database_name: databaseName });
+          if (versionId) params.set('version_id', versionId);
+          var fullSyncUrl = syncServiceUrl + '/sync?' + params.toString();
+          fetch(fullSyncUrl, { method: 'POST' })
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+            .then(function(result) {
+              if (result.ok) {
+                syncStatus.textContent = 'Sync done. Opening FiftyOne…';
+                var openUrl = appUrl;
+                if (result.data.dataset_name) {
+                  openUrl = appUrl.replace(/\/$/, '') + '/datasets/' + encodeURIComponent(result.data.dataset_name);
+                }
+                setTimeout(function() {
+                  window.open(openUrl, '_blank');
+                  syncStatus.textContent = result.data.sample_count != null
+                    ? 'Opened with ' + result.data.sample_count + ' samples.'
+                    : 'Opened.';
+                }, 3500);
+                setTimeout(function() { syncStatus.textContent = ''; }, 5000);
+              } else {
+                syncStatus.textContent = 'Sync failed: ' + (result.data.detail || result.data.message || 'Unknown error');
+                syncStatus.classList.add('error');
+              }
+            })
+            .catch(function(err) {
+              syncStatus.textContent = 'Sync error: ' + (err.message || 'Network error');
+              syncStatus.classList.add('error');
+            })
+            .finally(function() { syncBtn.disabled = false; });
         });
       }
     })();
@@ -164,8 +208,9 @@ async def message_template() -> HTMLResponse:
 async def render_launcher() -> HTMLResponse:
     """
     Return Jinja2 template for HostedTemplate. Tator fetches this URL and renders with tparams.
-    Required tparams: project (Tator project ID). Optional: iframe_host, base_port (default 5151), message, config_yaml.
-    Port for FiftyOne App = base_port + project.
+    Required tparams: project (Tator project ID). Optional: iframe_host (host for app URL), base_port (5151), ports_per_project (10).
+    "Open FiftyOne" opens the app in a new window. For "Sync from Tator" set: sync_service_url, api_url, token.
+    Port = base_port + (project - 1) * ports_per_project.
     """
     return HTMLResponse(LAUNCHER_TEMPLATE)
 
@@ -206,7 +251,7 @@ async def sync(
     """
     Trigger sync: fetch Tator media + localizations, build FiftyOne dataset, launch App.
     Requires fiftyone and tator packages. Returns port, status, dataset_name, and database_name.
-    Config file may specify: dataset_name, include_classes, image_extensions, max_samples, delete_existing.
+    Config file may specify: dataset_name, include_classes, image_extensions, max_samples.
     """
     from sync import sync_project_to_fiftyone
     from port_manager import get_port_for_project
@@ -222,6 +267,37 @@ async def sync(
         launch_app=launch_app,
     )
     result["port"] = port
+    return result
+
+
+@app_launch.post("/sync-to-tator")
+async def sync_to_tator(
+    project_id: int = Query(..., description="Tator project ID"),
+    version_id: int = Query(..., description="Tator version ID (required for update)"),
+    api_url: str = Query(..., description="Tator REST API base URL"),
+    token: str = Query(..., description="Tator API token"),
+    database_name: str | None = Query(None),
+    dataset_name: str | None = Query(None, description="FiftyOne dataset name (default: tator_project_{id})"),
+    label_attr: str = Query("Label", description="Tator attribute name for label"),
+    score_attr: str | None = Query(None, description="Tator attribute name for score/confidence; omit or empty to skip"),
+    debug: bool = Query(False, description="Print per-sample SKIP/UPDATE debug (or set FIFTYONE_SYNC_DEBUG=1)"),
+) -> dict:
+    """
+    Push FiftyOne dataset edits (labels, confidence) back to Tator localizations.
+    Requires the dataset to exist (run POST /sync first). Uses elemental_id to match samples.
+    """
+    from sync import sync_edits_to_tator
+    result = sync_edits_to_tator(
+        project_id=project_id,
+        version_id=version_id,
+        api_url=api_url.rstrip("/"),
+        token=token,
+        dataset_name=dataset_name,
+        database_name=database_name,
+        label_attr=label_attr,
+        score_attr=score_attr,
+        debug=debug,
+    )
     return result
 
 

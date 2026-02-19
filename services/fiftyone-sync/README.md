@@ -19,9 +19,11 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
 
 - **Launcher**: HostedTemplate integration
   - `GET /message` - Minimal template with single `{{ message }}` (for simple Hosted Template testing)
-  - `GET /render` - Full Jinja2 template for FiftyOne viewer iframe (tparams: project, host, base_port, message)
+  - `GET /render` - Launcher template with **Open FiftyOne** (opens app in new window) and **Sync from Tator** (tparams: project, iframe_host, base_port, sync_service_url, api_url, token)
   - `GET /launch` - Allocate port, return FiftyOne App URL
   - `POST /sync` - Trigger Tator-to-FiftyOne sync: fetch media + localizations, crop, build FiftyOne dataset, launch app (requires fiftyone + tator)
+  - `POST /sync-to-tator` - Push FiftyOne dataset edits (labels, confidence) back to Tator localizations
+  - FiftyOne opens in a **new browser tab** (not in an iframe). Set **`iframe_host`** to the host where the FiftyOne app runs so the Open FiftyOne URL is correct (e.g. same host as Tator or `localhost`).
 
 ## Setup
 
@@ -41,12 +43,12 @@ pip install -e ../../scripts/packages/tator-py
 ## Run
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
 ## Hosted Template applet (recommended)
 
-This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template from this service and renders it with template parameters. The result is a dashboard that embeds the FiftyOne viewer in an iframe.
+This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template and renders it with template parameters. The dashboard shows **Open FiftyOne** (opens the app in a new tab) and **Sync from Tator** (when sync_service_url, api_url, token are set).
 
 ### 1. Register the Hosted Template (organization level)
 
@@ -60,9 +62,10 @@ This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.
    - **Headers**: Leave empty unless the service requires auth.
    - **Template parameters** (optional defaults):
      - `base_port`: `5151`
-     - `iframe_host`: `localhost` — host the **browser** uses to load the FiftyOne iframe. Use a hostname the user’s browser can resolve (e.g. `localhost`). Do **not** use `host.docker.internal` here (browsers cannot resolve it).
+     - `iframe_host`: host for the FiftyOne app URL when opening in a new tab. **Use the same host you use to open Tator.** If you open Tator at `http://134.89.17.13:8080`, set `iframe_host` to `134.89.17.13` so the app URL is `http://134.89.17.13:5181/...`. If you use `localhost`, the app will try to load from the user’s machine (connection refused when Tator is opened from another host). Do **not** use `host.docker.internal` (browsers cannot resolve it).
      - `message`: optional header text (if set, replaces the default status line)
      - `config_yaml`: optional YAML config string for FiftyOne; shown in the header and exposed as `window.FIFTYONE_CONFIG_YAML` for scripts
+     - **Sync from Tator**: set `sync_service_url`, `api_url`, and `token`; optional `version_id`. When set, clicking it runs POST /sync and then opens FiftyOne in a new tab.
 
 Click **Save**.
 
@@ -77,21 +80,33 @@ Click **Save**.
    - **name**: `project`  
    - **value**: the project ID (same as this project’s ID).
 
-   You can override `iframe_host` or `base_port` here if needed. Keep `iframe_host` as `localhost` (or your Tator host) so the dashboard iframe loads in the browser.
+   Set **`iframe_host`** to the host you use to open Tator (e.g. `134.89.17.13`). If you use `localhost` but open Tator at a different host, the iframe will show "connection refused" because the browser will try to load FiftyOne from the user’s machine, not the server.
 
 7. Click **Save**.
 
 ### 3. Open the applet
 
-Go to the project, then **Analytics** → **Dashboards**. Open the applet you registered. The page will show the FiftyOne viewer iframe for this project (port = `base_port` + `project`).
+Go to the project, then **Analytics** → **Dashboards**. Open the applet. Click **Open FiftyOne** to open the viewer in a new tab, or **Sync from Tator** first to sync data and then open the viewer.
+
+### Recommended settings: Tator in Docker (localhost:8080), fiftyone-sync on host (port 8001)
+
+| Setting | Value | Who uses it |
+|---------|-------|-------------|
+| **URL** (Hosted Template) | `http://host.docker.internal:8001/render` | Tator (in Docker) fetches the template from the host. On Docker Desktop (Mac/Windows) use `host.docker.internal`. On Linux use the host IP (e.g. `172.17.0.1:8001`) or run sync in Docker on the same network. |
+| **base_port** | `5151` | Must match `port_manager.BASE_PORT`. |
+| **iframe_host** | `localhost` | Host for the FiftyOne app URL when opening in a new tab. |
+| **sync_service_url** | `http://localhost:8001` | Required for the "Sync from Tator" button; same machine as Tator from the user's perspective. |
+| **api_url** | `http://localhost:8080` | Sync service calls Tator's API; from the host, Tator is at localhost:8080. |
+
+There is no template parameter named **host**; the **URL** field is where Tator fetches the template from. Set **token** (Tator API token) for the "Sync from Tator" button.
 
 ### Tator in Docker: "Connection refused" and "host.docker.internal server IP address not found"
 
 The Hosted Template URL is **fetched by Tator’s backend** (gunicorn), not by the user’s browser. So the URL must be reachable from inside the container (or host) where gunicorn runs.
 
-- **Connection refused**: Hosted Template URL is fetched by gunicorn — use e.g. `http://host.docker.internal:8001/render`. **"host.docker.internal server IP address not found"**: Shown in the browser; the iframe uses `iframe_host`. Set template param **`iframe_host`** to `localhost` (not `host.docker.internal`).
+- **Connection refused**: Hosted Template URL is fetched by gunicorn — use e.g. `http://host.docker.internal:8001/render`. **"host.docker.internal server IP address not found"**: Set template param **`iframe_host`** to `localhost` (not `host.docker.internal`) so the Open FiftyOne URL works in the browser.
 - **If Tator runs in Docker and this service runs on the host**
-  - Hosted Template URL: `http://host.docker.internal:8001/render`. Template param `iframe_host`: `localhost`.
+  - Hosted Template URL: `http://host.docker.internal:8001/render`. Template params: `iframe_host`: `localhost`, `sync_service_url`: `http://localhost:8001`, `api_url`: `http://localhost:8080`.
   - Start this service with `--host 0.0.0.0`. Ensure port 8001 is reachable.
 
 - **If both run in Docker**
@@ -140,6 +155,8 @@ Optional query param **`database_name`** on `GET /launch` and `POST /sync` overr
 | `config_path` | no | Path to YAML/JSON config file for dataset build |
 | `launch_app` | no | Launch FiftyOne app after sync (default: true) |
 
+**Sync-from-Tator flow (dashboard):** The launcher template calls `POST /sync`, then opens the FiftyOne app in a new tab. The frontend opens the **dataset URL** (e.g. `http://host:port/datasets/tator_project_4`) using `dataset_name` from the response so the App loads the synced dataset directly. A short delay (~1.2s) before opening gives the FiftyOne server time to serve the correct session state ([Session lifecycle](https://docs.voxel51.com/api/fiftyone.core.session.session.html)). After launch we call `session.refresh()` so the first client connection receives the current dataset.
+
 ### Config file (YAML/JSON)
 
 Use `config_path` to pass a config file (e.g. `sample_config.yaml`):
@@ -149,7 +166,6 @@ dataset_name: tator_project_dataset
 include_classes: [Larvacean, Copepod]   # optional: filter labels
 image_extensions: ["*.png", "*.jpg"]
 max_samples: 500                         # optional: limit for testing
-delete_existing: true
 ```
 
 ### Data layout
@@ -159,6 +175,24 @@ delete_existing: true
 - Crops: `/tmp/fiftyone_sync_project_{id}/crops/{media_stem}/{elemental_id}.png`
 
 Labels come from `attributes.Label` (or `attributes.label`) in localizations.
+
+### Sync edits back to Tator
+
+`POST /sync-to-tator` pushes FiftyOne dataset edits (labels, confidence) back to Tator localizations. Run after editing in the FiftyOne app.
+
+| Param | Required | Description |
+|-------|----------|-------------|
+| `project_id` | yes | Tator project ID |
+| `version_id` | yes | Tator version ID (localizations must be in this version) |
+| `api_url` | yes | Tator REST API base URL |
+| `token` | yes | Tator API token |
+| `dataset_name` | no | FiftyOne dataset name (default: `tator_project_{id}`) |
+
+```bash
+curl -X POST "http://localhost:8001/sync-to-tator?project_id=4&version_id=1&api_url=https://tator.example.com&token=YOUR_TOKEN"
+```
+
+Returns `{"status": "ok", "updated": N, "failed": M, "errors": [...]}`.
 
 ## Embedding API Usage
 
