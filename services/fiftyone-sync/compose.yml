@@ -1,0 +1,29 @@
+# Single MongoDB for Voxel51 FiftyOne (per-project databases: fiftyone_project_1, fiftyone_project_2, ...)
+# Set FIFTYONE_DATABASE_URI=mongodb://localhost:27017 (or override)
+#
+# Usage: docker compose -f compose.yml up -d
+#
+# Background sync (Redis): To keep the UI responsive when syncing millions of localizations,
+# use the Tator stack's Redis. Set REDIS_HOST=redis (and same network as Tator) for the API,
+# and run the sync worker (e.g. python sync_worker.py) with REDIS_HOST=redis. See README.
+
+services:
+  mongo:
+    image: mongo
+    container_name: mongo-fiftyone
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    command: --dbpath /data/db --port 27017 --bind_ip_all
+    restart: always
+    networks:
+      - voxel51
+
+networks:
+  voxel51:
+    name: voxel51
+
+volumes:
+  mongodb_data:
+    driver: local

@@ -45,8 +45,11 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
+    ports:
+      - "6379:6379"  # publish so host processes (e.g. fiftyone-sync) can use REDIS_HOST=localhost
     networks:
       - private
+      - public
     entrypoint: redis-server --maxmemory 2048mb --maxmemory-policy allkeys-lru
 
   postgis:

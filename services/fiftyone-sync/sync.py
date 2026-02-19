@@ -79,6 +79,8 @@ def _launch_app_embedded(dataset: fo.Dataset, port: int):
         flush=True,
     )
     return session
+
+
 LOCALIZATION_BATCH_SIZE = 5000
 
 
@@ -862,6 +864,31 @@ def sync_edits_to_tator(
 
     print(f"[sync] sync_edits_to_tator: updated={updated} skipped={skipped} failed={failed}", flush=True)
     return {"status": "ok", "updated": updated, "skipped": skipped, "failed": failed, "errors": errors[:20]}
+
+
+def run_sync_job(
+    project_id: int,
+    version_id: int | None,
+    api_url: str,
+    token: str,
+    port: int,
+    database_name: str | None = None,
+    config_path: str | None = None,
+    launch_app: bool = True,
+) -> dict[str, Any]:
+    """
+    Entrypoint for RQ worker: all args are serializable. Calls sync_project_to_fiftyone.
+    """
+    return sync_project_to_fiftyone(
+        project_id=project_id,
+        version_id=version_id,
+        api_url=api_url,
+        token=token,
+        port=port,
+        database_name=database_name,
+        config_path=config_path,
+        launch_app=launch_app,
+    )
 
 
 def sync_project_to_fiftyone(

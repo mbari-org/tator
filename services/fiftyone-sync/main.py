@@ -159,29 +159,79 @@ LAUNCHER_TEMPLATE = """
           fetch(fullSyncUrl, { method: 'POST' })
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
             .then(function(result) {
-              if (result.ok) {
-                syncStatus.textContent = 'Sync done. Opening FiftyOne…';
-                var openUrl = appUrl;
-                if (result.data.dataset_name) {
-                  openUrl = appUrl.replace(/\/$/, '') + '/datasets/' + encodeURIComponent(result.data.dataset_name);
-                }
-                setTimeout(function() {
-                  window.open(openUrl, '_blank');
-                  syncStatus.textContent = result.data.sample_count != null
-                    ? 'Opened with ' + result.data.sample_count + ' samples.'
-                    : 'Opened.';
-                }, 3500);
-                setTimeout(function() { syncStatus.textContent = ''; }, 5000);
-              } else {
+              if (!result.ok) {
                 syncStatus.textContent = 'Sync failed: ' + (result.data.detail || result.data.message || 'Unknown error');
                 syncStatus.classList.add('error');
+                syncBtn.disabled = false;
+                return;
               }
+              var data = result.data;
+              if (data.job_id) {
+                syncStatus.textContent = 'Sync queued. Waiting for worker…';
+                var statusUrl = syncServiceUrl + '/sync/status/' + encodeURIComponent(data.job_id);
+                var poll = function() {
+                  fetch(statusUrl)
+                    .then(function(r) { return r.json(); })
+                    .then(function(s) {
+                      if (s.status === 'queued' || s.status === 'started' || s.status === 'deferred') {
+                        syncStatus.textContent = s.status === 'started' ? 'Sync in progress…' : 'Sync queued…';
+                        setTimeout(poll, 2500);
+                        return;
+                      }
+                      if (s.status === 'failed') {
+                        syncStatus.textContent = 'Sync failed: ' + (s.error || 'Unknown error');
+                        syncStatus.classList.add('error');
+                        syncBtn.disabled = false;
+                        return;
+                      }
+                      if (s.status === 'finished' && s.result) {
+                        var res = s.result;
+                        syncStatus.textContent = 'Sync done. Opening FiftyOne…';
+                        var openUrl = appUrl;
+                        if (res.dataset_name) {
+                          openUrl = appUrl.replace(/\/$/, '') + '/datasets/' + encodeURIComponent(res.dataset_name);
+                        }
+                        setTimeout(function() {
+                          window.open(openUrl, '_blank');
+                          syncStatus.textContent = res.sample_count != null
+                            ? 'Opened with ' + res.sample_count + ' samples.'
+                            : 'Opened.';
+                        }, 1500);
+                        setTimeout(function() { syncStatus.textContent = ''; }, 5000);
+                        syncBtn.disabled = false;
+                        return;
+                      }
+                      syncStatus.textContent = 'Sync: ' + (s.status || 'unknown');
+                      setTimeout(poll, 2500);
+                    })
+                    .catch(function(err) {
+                      syncStatus.textContent = 'Status check failed: ' + (err.message || 'Network error');
+                      syncStatus.classList.add('error');
+                      syncBtn.disabled = false;
+                    });
+                };
+                poll();
+                return;
+              }
+              syncStatus.textContent = 'Sync done. Opening FiftyOne…';
+              var openUrl = appUrl;
+              if (data.dataset_name) {
+                openUrl = appUrl.replace(/\/$/, '') + '/datasets/' + encodeURIComponent(data.dataset_name);
+              }
+              setTimeout(function() {
+                window.open(openUrl, '_blank');
+                syncStatus.textContent = data.sample_count != null
+                  ? 'Opened with ' + data.sample_count + ' samples.'
+                  : 'Opened.';
+              }, 3500);
+              setTimeout(function() { syncStatus.textContent = ''; }, 5000);
+              syncBtn.disabled = false;
             })
             .catch(function(err) {
               syncStatus.textContent = 'Sync error: ' + (err.message || 'Network error');
               syncStatus.classList.add('error');
-            })
-            .finally(function() { syncBtn.disabled = false; });
+              syncBtn.disabled = false;
+            });
         });
       }
       var syncToTatorBtn = document.getElementById('sync-to-tator-btn');
@@ -294,16 +344,34 @@ async def sync(
 ) -> dict:
     """
     Trigger sync: fetch Tator media + localizations, build FiftyOne dataset, launch App.
-    Requires fiftyone and tator packages. Returns port, status, dataset_name, and database_name.
-    Config file may specify: dataset_name, include_classes, image_extensions, max_samples.
+    When Redis is configured (REDIS_HOST or REDIS_URL), enqueues the job and returns
+    job_id immediately; poll GET /sync/status/{job_id} for progress. Otherwise runs
+    sync inline (can block for a long time on large projects).
     """
-    from sync import sync_project_to_fiftyone
     from port_manager import get_port_for_project
+    from sync_queue import is_queue_available, enqueue_sync
+
     port = get_port_for_project(project_id)
+    api_url_clean = api_url.rstrip("/")
+
+    if is_queue_available():
+        job_id = enqueue_sync(
+            project_id=project_id,
+            version_id=version_id,
+            api_url=api_url_clean,
+            token=token,
+            port=port,
+            database_name=database_name,
+            config_path=config_path,
+            launch_app=launch_app,
+        )
+        return {"job_id": job_id, "status": "queued", "port": port}
+    # No Redis: run inline (blocking; may be slow for large projects)
+    from sync import sync_project_to_fiftyone
     result = sync_project_to_fiftyone(
         project_id=project_id,
         version_id=version_id,
-        api_url=api_url.rstrip("/"),
+        api_url=api_url_clean,
         token=token,
         port=port,
         database_name=database_name,
@@ -312,6 +380,19 @@ async def sync(
     )
     result["port"] = port
     return result
+
+
+@app_launch.get("/sync/status/{job_id}")
+async def sync_status(job_id: str) -> dict:
+    """
+    Poll status of an enqueued sync job. Returns status (queued|started|finished|failed),
+    and when finished: result (port, dataset_name, sample_count, etc.) or error.
+    """
+    from sync_queue import is_queue_available, get_job_status
+
+    if not is_queue_available():
+        raise HTTPException(status_code=503, detail="Redis not configured; no job queue")
+    return get_job_status(job_id)
 
 
 @app_launch.post("/sync-to-tator")
