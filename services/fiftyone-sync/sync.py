@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import time
+from urllib.parse import urlencode
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime
 from pathlib import Path
@@ -198,35 +199,60 @@ def fetch_and_save_localizations(
     api: Any,
     project_id: int,
     version_id: int | None = None,
+    media_ids: list[int] | None = None,
 ) -> str:
     """
     Fetch all current localizations from Tator and write to a JSONL file.
     Overwrites the file (mode "w"), so the JSONL is always reconciled with Tator:
     removed localizations are absent, and the file is the single source of truth for the sync.
     Returns path to the file (e.g. .../localizations.jsonl). Uses LOCALIZATION_BATCH_SIZE per batch.
+    If media_ids is provided, only localizations for those media are fetched (required when syncing
+    a subset of media; avoids empty results when project localizations are scoped to media).
     """
     base_dir = _project_tmp_dir(project_id)
     out_path = os.path.join(base_dir, "localizations.jsonl")
     print(f"[sync] Localizations JSONL will be saved to: {out_path}", flush=True)
     batch_size = LOCALIZATION_BATCH_SIZE
+
+    def _count_kwargs(use_version: bool) -> dict:
+        kwargs: dict = {}
+        if media_ids:
+            kwargs["media_id"] = media_ids
+        if use_version and version_id is not None:
+            kwargs["version"] = [version_id]
+        return kwargs
+
+    def _list_kwargs(after: int | None, use_version: bool) -> dict:
+        kwargs: dict = {"stop": batch_size}
+        if media_ids:
+            kwargs["media_id"] = media_ids
+        if use_version and version_id is not None:
+            kwargs["version"] = [version_id]
+        if after is not None:
+            kwargs["after"] = after
+        return kwargs
+
+    use_version = True
     try:
-        count_kwargs = {}
-        if version_id is not None:
-            count_kwargs["version"] = [version_id]
+        count_kwargs = _count_kwargs(use_version=True)
         loc_count = api.get_localization_count(project_id, **count_kwargs)
-        print(f"[sync] get_localization_count(project_id={project_id}) = {loc_count}", flush=True)
+        print(f"[sync] get_localization_count(project_id={project_id}, media_ids={bool(media_ids)}, version={version_id}) = {loc_count}", flush=True)
+        if loc_count == 0 and version_id is not None:
+            # Fallback: requested version may have no localizations; try without version filter
+            count_kwargs_no_ver = _count_kwargs(use_version=False)
+            count_no_ver = api.get_localization_count(project_id, **count_kwargs_no_ver)
+            if count_no_ver > 0:
+                print(f"[sync] Version {version_id} has 0 localizations; falling back to all versions (count={count_no_ver})", flush=True)
+                use_version = False
     except Exception as e:
         loc_count = None
         print(f"[sync] get_localization_count failed (will still try list): {e}", flush=True)
+
     total = 0
     after_id = None
     with open(out_path, "w") as f:
         while True:
-            kwargs = {"stop": batch_size}
-            if version_id is not None:
-                kwargs["version"] = [version_id]
-            if after_id is not None:
-                kwargs["after"] = after_id
+            kwargs = _list_kwargs(after_id, use_version)
             print(f"[sync] get_localization_list(project_id={project_id}, {kwargs})", flush=True)
             try:
                 batch = api.get_localization_list(project_id, **kwargs)
@@ -235,6 +261,12 @@ def fetch_and_save_localizations(
                 print("get_localization_list failed", flush=True)
                 break
             if not batch:
+                if total == 0 and version_id is not None and use_version:
+                    # First batch empty with version filter; retry without version
+                    print(f"[sync] First batch empty with version={version_id}; retrying without version filter", flush=True)
+                    use_version = False
+                    after_id = None
+                    continue
                 print(f"[sync] Localizations batch empty (after={after_id}), done", flush=True)
                 break
             for loc in batch:
@@ -435,6 +467,45 @@ def _content_hash(label: Any, confidence: Any) -> str:
     ).hexdigest()
 
 
+def _tator_localization_url(
+    api_url: str,
+    project_id: int,
+    loc: dict,
+    version_id: int | None = None,
+) -> str | None:
+    """
+    Build Tator annotation UI URL that opens the media with this localization selected.
+    Format: {base}/{project_id}/annotation/{media_id}?sort_by=$name&selected_entity={elemental_id}&selected_type=...&version=...&lock=0&fill_boxes=1&toggle_text=1
+    Uses version_id if provided, else loc['version']. selected_type uses loc['type'] (id or name).
+    Returns None if api_url, project_id, or media id is missing.
+    """
+    if not api_url or project_id is None:
+        return None
+    base = api_url.rstrip("/")
+    vid = version_id if version_id is not None else loc.get("version")
+    media_id = loc.get("media")
+    if media_id is None or vid is None:
+        return None
+    path = f"{base}/{project_id}/annotation/{media_id}"
+    elemental_id = loc.get("elemental_id") or loc.get("id")
+    selected_type = loc.get("type")  # type id (int) or type name (str) if present
+    if selected_type is not None:
+        selected_type = str(selected_type)
+    else:
+        selected_type = ""
+    params = {
+        "sort_by": "$name",
+        "selected_entity": elemental_id or "",
+        "selected_type": selected_type,
+        "version": str(vid),
+        "lock": "0",
+        "fill_boxes": "1",
+        "toggle_text": "1",
+    }
+    query = urlencode(params, safe="")
+    return f"{path}?{query}"
+
+
 def _media_id_to_stem(download_dir: str) -> dict[int, str]:
     """Map media_id -> file stem for crop path resolution (e.g. 123 -> '123_image')."""
     out: dict[int, str] = {}
@@ -457,6 +528,9 @@ def _create_sample_from_loc(
     crops_dir: str,
     media_stem: str,
     include_classes: set[str],
+    api_url: str | None = None,
+    project_id: int | None = None,
+    version_id: int | None = None,
 ) -> fo.Sample | None:
     """Create a FiftyOne sample from a localization (for reconcile add-new)."""
     elemental_id = loc.get("elemental_id") or loc.get("id")
@@ -474,6 +548,10 @@ def _create_sample_from_loc(
     sample["elemental_id"] = elemental_id
     sample["media_stem"] = media_stem
     sample["box_hash"] = _box_hash(loc)
+    if api_url and project_id is not None:
+        tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
+        if tator_url:
+            sample["url"] = tator_url
     sample.tags.append(label)
     attrs = loc.get("attributes") or {}
     score = attrs.get("Score") or attrs.get("score")
@@ -551,7 +629,13 @@ def reconcile_dataset_with_tator(
         media_stem = media_id_to_stem.get(int(media_id))
         if not media_stem:
             continue
-        sample = _create_sample_from_loc(loc, crops_dir, media_stem, include_classes)
+        api_url = config.get("api_url")
+        project_id = config.get("project_id")
+        version_id = config.get("version_id")
+        sample = _create_sample_from_loc(
+            loc, crops_dir, media_stem, include_classes,
+            api_url=api_url, project_id=project_id, version_id=version_id,
+        )
         if sample:
             dataset.add_samples([sample])
             added += 1
@@ -601,6 +685,7 @@ def build_fiftyone_dataset_from_crops(
 
     # Load localizations index by elemental_id
     loc_index = _load_localizations_index(localizations_jsonl_path)
+    print(f"[sync] ----->loc_index={loc_index}", flush=True)
     print("Loaded %s localizations from JSONL", len(loc_index))
     print(f"[sync] Loaded {len(loc_index)} localizations from JSONL", flush=True)
 
@@ -631,6 +716,15 @@ def build_fiftyone_dataset_from_crops(
             sample["elemental_id"] = elemental_id
             sample["media_stem"] = media_stem
             sample["box_hash"] = _box_hash(loc)
+            api_url = config.get("source_url")
+            project_id = config.get("project_id")
+            version_id = config.get("version_id")
+            print(f"[sync] ----->loc={loc} api_url={api_url} project_id={project_id} version_id={version_id}", flush=True)
+            if loc and api_url and project_id is not None:
+                tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
+                if tator_url:
+                    sample["url"] = tator_url
+                    print(f"[sync] ----->tator_url={tator_url}", flush=True)
             sample.tags.append(label)
             if loc:
                 attrs = loc.get("attributes") or {}
@@ -650,20 +744,22 @@ def build_fiftyone_dataset_from_crops(
 
     # Handle existing dataset: always reconcile, never delete
     if dataset_name in fo.list_datasets():
-        print(f"[sync] --------->Reconcile: loading dataset {dataset_name}", flush=True)
-        dataset = fo.load_dataset(dataset_name)
-        dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
-        dataset = reconcile_dataset_with_tator(
-            dataset=dataset,
-            loc_index=loc_index,
-            crops_dir=crops_dir,
-            download_dir=download_dir,
-            config=config,
-            image_extensions=image_extensions,
-            max_samples=max_samples,
-        )
-        print(f"[sync] --------->Reconcile: dataset {dataset_name} loaded", flush=True)
-        return dataset
+        # Delete the dataset if it exists
+        fo.delete_dataset(dataset_name)
+        # print(f"[sync] --------->Reconcile: loading dataset {dataset_name}", flush=True)
+        # dataset = fo.load_dataset(dataset_name)
+        # dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
+        # dataset = reconcile_dataset_with_tator(
+        #     dataset=dataset,
+        #     loc_index=loc_index,
+        #     crops_dir=crops_dir,
+        #     download_dir=download_dir,
+        #     config=config,
+        #     image_extensions=image_extensions,
+        #     max_samples=max_samples,
+        # )
+        # print(f"[sync] --------->Reconcile: dataset {dataset_name} loaded", flush=True)
+        # return dataset
 
     print(f"[sync] --------->Reconcile: creating new dataset {dataset_name}", flush=True)
     dataset = fo.Dataset(dataset_name)
@@ -819,7 +915,9 @@ def sync_project_to_fiftyone(
                 if tmp_dir:
                     print("saved_media_dir:", tmp_dir, flush=True)
         print(f"[sync] Fetching localizations...", flush=True)
-        localizations_path = fetch_and_save_localizations(api, project_id, version_id=version_id)
+        localizations_path = fetch_and_save_localizations(
+            api, project_id, version_id=version_id, media_ids=media_ids_list or None
+        )
         if localizations_path:
             print(f"[sync] saved_localizations_path (JSONL): {localizations_path}", flush=True)
         if tmp_dir and localizations_path:
@@ -858,6 +956,11 @@ def sync_project_to_fiftyone(
         except Exception as e:
             print("Failed to load config %s: %s", config_path, e)
             print(f"[sync] Config load failed: {e}", flush=True)
+
+    # Inject Tator base URL and ids so sample "url" can link to the localization's media page
+    config["source_url"] = api_url.rstrip("/")
+    config["project_id"] = project_id
+    config["version_id"] = version_id
 
     dataset_name = config.get("dataset_name") or f"tator_project_{project_id}" 
 
@@ -958,7 +1061,9 @@ def main() -> None:
             print("No Media objects returned; download skipped.")
     version_id_str = os.getenv("VERSION_ID", "").strip()
     version_id = int(version_id_str) if version_id_str else None
-    localizations_path = fetch_and_save_localizations(api, project_id, version_id=version_id)
+    localizations_path = fetch_and_save_localizations(
+        api, project_id, version_id=version_id, media_ids=media_ids if media_ids else None
+    )
     if localizations_path:
         print("saved_localizations_path (JSONL):", localizations_path)
     base_dir = _project_tmp_dir(project_id)

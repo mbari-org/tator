@@ -83,6 +83,7 @@ async def get_embed(job_id: str) -> dict:
 # Required tparams: project (int, Tator project ID).
 # Optional: iframe_host, base_port (5151), ports_per_project (10, must match port_manager).
 # For "Sync from Tator" button: sync_service_url, api_url, token; optional version_id, database_name.
+# For "Sync To Tator" button: same plus version_id (required for push).
 # FiftyOne opens in a new window/tab (Open FiftyOne button); no iframe.
 LAUNCHER_TEMPLATE = """
 <!DOCTYPE html>
@@ -102,6 +103,8 @@ LAUNCHER_TEMPLATE = """
     .applet-header button { padding: 0.35rem 0.75rem; cursor: pointer; background: #3a7bd5; color: #fff; border: none; border-radius: 4px; font-size: 0.8rem; }
     .applet-header button:hover { background: #2d6ac4; }
     .applet-header button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .applet-header .btn-icon { margin-right: 0.25rem; }
+    .applet-header .btn-icon.end { margin-right: 0; margin-left: 0.25rem; }
   </style>
 </head>
 <body>
@@ -118,7 +121,10 @@ LAUNCHER_TEMPLATE = """
     </div>
     <button type="button" id="open-fiftyone-btn">Open FiftyOne</button>
     {% if sync_service_url and api_url and token %}
-    <button type="button" id="sync-from-tator-btn">Sync from Tator</button>
+    <button type="button" id="sync-from-tator-btn"><span class="btn-icon" aria-hidden="true">←</span>Sync from Tator</button>
+    {% if version_id %}
+    <button type="button" id="sync-to-tator-btn">Sync To Tator<span class="btn-icon end" aria-hidden="true">→</span></button>
+    {% endif %}
     <span id="sync-status" class="sync-status" aria-live="polite"></span>
     {% endif %}
   </div>
@@ -176,6 +182,44 @@ LAUNCHER_TEMPLATE = """
               syncStatus.classList.add('error');
             })
             .finally(function() { syncBtn.disabled = false; });
+        });
+      }
+      var syncToTatorBtn = document.getElementById('sync-to-tator-btn');
+      if (syncToTatorBtn && syncStatus && syncServiceUrl && apiUrl && token && versionId) {
+        syncToTatorBtn.addEventListener('click', function() {
+          syncToTatorBtn.disabled = true;
+          syncStatus.textContent = 'Pushing to Tator…';
+          syncStatus.classList.remove('error');
+          var params = new URLSearchParams({
+            project_id: String(project),
+            version_id: versionId,
+            api_url: apiUrl,
+            token: token,
+            database_name: databaseName
+          });
+          var fullUrl = syncServiceUrl + '/sync-to-tator?' + params.toString();
+          fetch(fullUrl, { method: 'POST' })
+            .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
+            .then(function(result) {
+              if (result.ok) {
+                syncStatus.textContent = 'Sync to Tator done.';
+                if (result.data.updated != null)
+                  syncStatus.textContent += ' Updated: ' + result.data.updated;
+                if (result.data.skipped != null)
+                  syncStatus.textContent += ', Skipped: ' + result.data.skipped;
+                if (result.data.failed != null && result.data.failed > 0)
+                  syncStatus.textContent += ', Failed: ' + result.data.failed;
+                setTimeout(function() { syncStatus.textContent = ''; }, 5000);
+              } else {
+                syncStatus.textContent = 'Sync to Tator failed: ' + (result.data.detail || result.data.message || 'Unknown error');
+                syncStatus.classList.add('error');
+              }
+            })
+            .catch(function(err) {
+              syncStatus.textContent = 'Sync to Tator error: ' + (err.message || 'Network error');
+              syncStatus.classList.add('error');
+            })
+            .finally(function() { syncToTatorBtn.disabled = false; });
         });
       }
     })();
