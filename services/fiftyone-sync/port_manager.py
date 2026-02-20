@@ -1,7 +1,6 @@
 """
-Port manager: assigns unique ports per Tator project for FiftyOne App instances.
-Uses a single MongoDB with per-project databases. Blocks PORTS_PER_PROJECT ports per project
-(up to 10 users per project). Override via FIFTYONE_DATABASE_URI.
+Port manager: assigns a unique port per Tator project for FiftyOne App instances.
+Uses a single MongoDB with per-project databases. Override via FIFTYONE_DATABASE_URI.
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 BASE_PORT = 5151
-PORTS_PER_PROJECT = 10  # Block 10 ports per project for up to 10 users
 MAX_PROJECTS = 1000
 
 # In-memory: project_id -> {"port": int, "process": subprocess.Popen | None, "database_name": str, ...}
@@ -45,11 +43,9 @@ def get_database_name(project_id: int, override: str | None = None) -> str:
 
 def get_port_for_project(project_id: int) -> int:
     """
-    Return the base port for a project. Project N gets ports [base, base + PORTS_PER_PROJECT - 1].
-    Project 1: 5151-5160, project 2: 5161-5170, etc. First port used by default.
+    Return the port for a project. One port per project: project 1 -> 5151, project 2 -> 5152, etc.
     """
-    block = (project_id - 1) % MAX_PROJECTS
-    return BASE_PORT + block * PORTS_PER_PROJECT
+    return BASE_PORT + (project_id - 1) % MAX_PROJECTS
 
 
 def ensure_session(
@@ -58,7 +54,7 @@ def ensure_session(
     database_name: str | None = None,
 ) -> int:
     """
-    Ensure a FiftyOne session exists for the project. Returns the base port (first in block).
+    Ensure a FiftyOne session exists for the project. Returns the port for this project.
     fo.launch_app() is done by sync worker. database_name is resolved via get_database_name.
     """
     port = get_port_for_project(project_id)

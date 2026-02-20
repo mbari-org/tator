@@ -15,7 +15,8 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-FASTVSS_BASE_URL = os.environ.get("FASTVSS_API_URL", "http://localhost:8000").rstrip("/")
+_url = os.environ.get("FASTVSS_API_URL")
+FASTVSS_BASE_URL = _url.strip().rstrip("/") if _url else None
 
 # Our job_id -> (fastvss_job_id, project)
 _job_map: dict[str, tuple[str, str]] = {}
@@ -37,6 +38,8 @@ async def queue_embedding_job(
     Forward batch to Fast-VSS POST /embeddings/{project}/, get job_id, return our UUID.
     Poll GET /embed/{uuid} for results (we poll Fast-VSS /predict/job/{job_id}/{project}).
     """
+    if not FASTVSS_BASE_URL:
+        raise ValueError("FASTVSS_API_URL environment variable is not set")
     job_id = str(uuid.uuid4())
     async with _queue_lock:
         _queue_results[job_id] = {"status": "pending", "embeddings": None, "error": None}
@@ -80,6 +83,8 @@ async def queue_embedding_job(
 
 async def _poll_fastvss_result(job_id: str) -> None:
     """Poll Fast-VSS /predict/job/{job_id}/{project} and update _queue_results when ready."""
+    if not FASTVSS_BASE_URL:
+        return
     mapped = _job_map.get(job_id)
     if not mapped:
         return

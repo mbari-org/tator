@@ -7,13 +7,16 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+import httpx
+
 from embedding_service import (
+    FASTVSS_BASE_URL,
     get_or_poll_embedding_result,
     init_disk_cache,
     queue_embedding_job,
@@ -75,15 +78,41 @@ async def get_embed(job_id: str) -> dict:
     return result
 
 
+@router.get("/embedding-projects")
+async def get_embedding_projects() -> dict:
+    """
+    Proxy to embedding service GET /projects. Returns {"projects": ["name", ...]}.
+    Uses FASTVSS_API_URL. Used by the launcher applet to show embedding service
+    availability and whether the current project is registered. On failure returns 503.
+    """
+    if not FASTVSS_BASE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail="FASTVSS_API_URL is not set",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{FASTVSS_BASE_URL}/projects")
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Embedding service unavailable: {e!s}",
+        ) from e
+
+
 # --- Launcher (HostedTemplate) ---
 
 
 # Jinja2 template for Tator Hosted Template (applet/dashboard).
 # See: https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates
 # Required tparams: project (int, Tator project ID).
-# Optional: iframe_host, base_port (5151), ports_per_project (10, must match port_manager).
-# For "Sync from Tator" button: sync_service_url, api_url, token; optional version_id, database_name.
-# For "Sync To Tator" button: same plus version_id (required for push).
+# Optional: iframe_host, base_port (5151).
+# For "Sync from Tator" / "Sync to Tator": set sync_service_url, api_url (no token tparam).
+# User enters their Tator API token in the applet and clicks "Test token"; sync controls enable after token is verified.
+# Optional tparams: version_id, database_name, project_name (Tator project name for embedding check).
+# Embedding service status: server uses FASTVSS_API_URL; GET /embedding-projects shows availability.
 # FiftyOne opens in a new window/tab (Open FiftyOne button); no iframe.
 LAUNCHER_TEMPLATE = """
 <!DOCTYPE html>
@@ -105,36 +134,88 @@ LAUNCHER_TEMPLATE = """
     .applet-header button:disabled { opacity: 0.6; cursor: not-allowed; }
     .applet-header .btn-icon { margin-right: 0.25rem; }
     .applet-header .btn-icon.end { margin-right: 0; margin-left: 0.25rem; }
+    .applet-header select { padding: 0.35rem 0.5rem; font-size: 0.8rem; background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; min-width: 10rem; }
+    .applet-header input[type="password"] { padding: 0.35rem 0.5rem; font-size: 0.8rem; background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; min-width: 12rem; }
+    .applet-header a.token-link { font-size: 0.8rem; color: #6ab; }
+    .applet-header a.token-link:hover { color: #8cd; text-decoration: underline; }
+    .applet-header table { border-collapse: collapse; width: 100%; max-width: 56rem; }
+    .applet-header th { text-align: left; padding: 0.5rem 1rem 0.25rem 0; font-size: 0.75rem; color: #999; font-weight: 600; vertical-align: top; white-space: nowrap; }
+    .applet-header td { padding: 0.25rem 0; vertical-align: middle; }
+    .applet-header tr + tr th { padding-top: 0.75rem; }
+    .applet-header .cell-controls { display: flex; align-items: center; gap: 0.5rem 1rem; flex-wrap: wrap; }
   </style>
 </head>
 <body>
   <div class="applet-header">
-    <div>
-      {% if message %}
-      <p>{{ message }}</p>
-      {% else %}
-      <p>Voxel51 FiftyOne viewer – Project {{ project }} (port {{ (base_port | default(5151) | int) + ((project | int) - 1) * (ports_per_project | default(10) | int) }})</p>
-      {% endif %}
-      {% if config_yaml %}
-      <div id="config-yaml-data" class="config-yaml" title="config_yaml" data-config="{{ config_yaml | e }}">{{ config_yaml }}</div>
-      {% endif %}
-    </div>
-    <button type="button" id="open-fiftyone-btn">Open FiftyOne</button>
-    {% if sync_service_url and api_url and token %}
-    <button type="button" id="sync-from-tator-btn"><span class="btn-icon" aria-hidden="true">←</span>Sync from Tator</button>
-    {% if version_id %}
-    <button type="button" id="sync-to-tator-btn">Sync To Tator<span class="btn-icon end" aria-hidden="true">→</span></button>
-    {% endif %}
-    <span id="sync-status" class="sync-status" aria-live="polite"></span>
-    {% endif %}
+    <table>
+      <tbody>
+        <tr>
+          <th>Info</th>
+          <td>
+            {% if message %}
+            <p>{{ message }}</p>
+            {% else %}
+            <p>Voxel51 FiftyOne viewer – Project {{ project }} (port {{ (base_port | default(5151) | int) + ((project | int) - 1) }})</p>
+            {% endif %}
+            {% if config_yaml %}
+            <div id="config-yaml-data" class="config-yaml" title="config_yaml" data-config="{{ config_yaml | e }}">{{ config_yaml }}</div>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <th>Launch</th>
+          <td>
+            <button type="button" id="open-fiftyone-btn">Open FiftyOne</button>
+          </td>
+        </tr>
+        {% if sync_service_url and api_url %}
+        <tr>
+          <th>Token</th>
+          <td>
+            <div class="cell-controls">
+              <label for="user-token">API token:</label>
+              <input type="password" id="user-token" placeholder="Your Tator API token" autocomplete="off" />
+              <a href="{{ ((api_url | default('')).rstrip('/') ~ '/token') | e }}" target="_blank" rel="noopener" class="token-link">Get your token</a>
+              <button type="button" id="test-token-btn">Test token</button>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <th>Version</th>
+          <td>
+            <div class="cell-controls">
+              <select id="version-select" aria-label="version" disabled>
+                <option value="">Enter token and click Test</option>
+              </select>
+            </div>
+          </td>
+        </tr>
+        <tr>
+          <th>Sync</th>
+          <td>
+            <div class="cell-controls">
+              <button type="button" id="sync-from-tator-btn" disabled title="Loads the selected version and launches a Voxel51 (FiftyOne) viewer in another tab."><span class="btn-icon" aria-hidden="true">←</span>Load from Tator</button>
+              <button type="button" id="sync-to-tator-btn" disabled title="Pushes any revised data from FiftyOne back to the selected version.">Sync to Tator<span class="btn-icon end" aria-hidden="true">→</span></button>
+              <span id="sync-status" class="sync-status" aria-live="polite"></span>
+            </div>
+          </td>
+        </tr>
+        {% endif %}
+        <tr>
+          <th>Embedding service</th>
+          <td>
+            <span id="embedding-status" class="sync-status" aria-live="polite">Checking…</span>
+          </td>
+        </tr>
+      </tbody>
+    </table>
   </div>
   <script>
     (function() {
       var project = parseInt("{{ project }}", 10) || 0;
       var iframeHost = "{{ (iframe_host | default('localhost')) }}";
       var basePort = {{ (base_port | default(5151)) | int }};
-      var portsPerProject = {{ (ports_per_project | default(10)) | int }};
-      var port = basePort + (project - 1) * portsPerProject;
+      var port = basePort + (project - 1);
       var appUrl = 'http://' + iframeHost + ':' + port + '/';
       var configYamlEl = document.getElementById('config-yaml-data');
       var configYaml = configYamlEl ? (configYamlEl.getAttribute('data-config') || '') : '';
@@ -143,18 +224,156 @@ LAUNCHER_TEMPLATE = """
       if (openBtn) openBtn.addEventListener('click', function() { window.open(appUrl, '_blank'); });
       var syncServiceUrl = "{{ (sync_service_url | default('') | e) }}".replace(/\/$/, '');
       var apiUrl = "{{ api_url | default('') | e }}";
-      var token = "{{ token | default('') | e }}";
-      var versionId = "{{ version_id | default('') | e }}";
+      var projectName = "{{ (project_name | default('') | e) }}".trim();
+      var initialVersionId = "{{ version_id | default('') | e }}";
       var databaseName = "{{ database_name | default('') | e }}" || ('fiftyone_project_' + project);
       var syncBtn = document.getElementById('sync-from-tator-btn');
       var syncStatus = document.getElementById('sync-status');
-      if (syncBtn && syncStatus && syncServiceUrl && apiUrl && token) {
+      var versionSelect = document.getElementById('version-select');
+      var syncToTatorBtn = document.getElementById('sync-to-tator-btn');
+      var tokenInput = document.getElementById('user-token');
+      var testTokenBtn = document.getElementById('test-token-btn');
+      var tokenVerified = false;
+      var versionId = '';
+      function getToken() {
+        return tokenInput ? tokenInput.value.trim() : '';
+      }
+      function setVersionFromDropdown() {
+        versionId = versionSelect && versionSelect.value ? versionSelect.value : '';
+        if (syncToTatorBtn) syncToTatorBtn.disabled = !tokenVerified || !versionId;
+      }
+      function setSyncControlsEnabled(enabled) {
+        tokenVerified = enabled;
+        if (versionSelect) versionSelect.disabled = !enabled;
+        if (syncBtn) syncBtn.disabled = !enabled;
+        if (syncToTatorBtn) syncToTatorBtn.disabled = !enabled || !versionId;
+      }
+      function loadVersions(token) {
+        if (!versionSelect || !syncServiceUrl || !apiUrl || !token) return;
+        versionSelect.innerHTML = '<option value="">Loading…</option>';
+        fetch(syncServiceUrl + '/versions?project_id=' + project + '&api_url=' + encodeURIComponent(apiUrl), {
+          headers: { 'Authorization': 'Token ' + token }
+        })
+          .then(function(r) {
+            if (!r.ok) return r.json().then(function(d) { throw new Error(d.detail || r.statusText); });
+            return r.json();
+          })
+          .then(function(versions) {
+            versionSelect.innerHTML = '';
+            (versions || []).forEach(function(v) {
+              var opt = document.createElement('option');
+              opt.value = String(v.id);
+              opt.textContent = v.name + (v.number != null ? ' (' + v.number + ')' : '');
+              versionSelect.appendChild(opt);
+            });
+            if (initialVersionId && versionSelect.querySelector('option[value="' + initialVersionId + '"]')) {
+              versionSelect.value = initialVersionId;
+            } else if (versionSelect.options.length) {
+              versionSelect.selectedIndex = 0;
+            }
+            setVersionFromDropdown();
+          })
+          .catch(function(err) {
+            versionSelect.innerHTML = '';
+            var opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'Failed to load versions';
+            versionSelect.appendChild(opt);
+            setVersionFromDropdown();
+          });
+      }
+      if (tokenInput) {
+        tokenInput.addEventListener('input', function() {
+          setSyncControlsEnabled(false);
+          if (versionSelect) {
+            versionSelect.innerHTML = '';
+            var opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = 'Enter token and click Test';
+            versionSelect.appendChild(opt);
+          }
+          if (syncStatus) { syncStatus.textContent = ''; syncStatus.classList.remove('error'); }
+        });
+      }
+      if (testTokenBtn && syncStatus && syncServiceUrl && apiUrl) {
+        testTokenBtn.addEventListener('click', function() {
+          var token = getToken();
+          if (!token) {
+            syncStatus.textContent = 'Enter your API token first.';
+            syncStatus.classList.add('error');
+            return;
+          }
+          testTokenBtn.disabled = true;
+          syncStatus.textContent = 'Testing token…';
+          syncStatus.classList.remove('error');
+          fetch(syncServiceUrl + '/versions?project_id=' + project + '&api_url=' + encodeURIComponent(apiUrl), {
+            headers: { 'Authorization': 'Token ' + token }
+          })
+            .then(function(r) {
+              if (!r.ok) return r.json().then(function(d) { throw new Error(d.detail || r.statusText); });
+              return r.json();
+            })
+            .then(function(versions) {
+              setSyncControlsEnabled(true);
+              loadVersions(token);
+              syncStatus.textContent = 'Token OK. Sync enabled.';
+              setTimeout(function() { syncStatus.textContent = ''; }, 3000);
+            })
+            .catch(function(err) {
+              setSyncControlsEnabled(false);
+              syncStatus.textContent = 'Token invalid: ' + (err.message || 'Unknown error');
+              syncStatus.classList.add('error');
+              if (versionSelect) {
+                versionSelect.innerHTML = '';
+                var opt = document.createElement('option');
+                opt.value = '';
+                opt.textContent = 'Enter token and click Test';
+                versionSelect.appendChild(opt);
+              }
+            })
+            .finally(function() { testTokenBtn.disabled = false; });
+        });
+      }
+      if (versionSelect) versionSelect.addEventListener('change', setVersionFromDropdown);
+      (function checkEmbeddingService() {
+        var el = document.getElementById('embedding-status');
+        if (!el) return;
+        var base = syncServiceUrl || window.location.origin;
+        var url = base.replace(/\/$/, '') + '/embedding-projects';
+        fetch(url)
+          .then(function(r) {
+            if (!r.ok) throw new Error(r.status === 503 ? (r.statusText || 'Service unavailable') : (r.status + ' ' + r.statusText));
+            return r.json();
+          })
+          .then(function(data) {
+            var projects = (data && data.projects) ? data.projects : [];
+            if (projectName) {
+              var inList = projects.indexOf(projectName) !== -1;
+              el.textContent = inList
+                ? 'Available, project registered'
+                : 'Available, but project not registered; cannot compute embeddings or UMAP but you can still edit the localizations';
+              if (!inList) el.classList.add('error');
+              else el.classList.remove('error');
+            } else {
+              el.textContent = 'Available (' + (projects.length || 0) + ' project(s)); set project_name tparam to check this project';
+              el.classList.remove('error');
+            }
+          })
+          .catch(function(err) {
+            el.textContent = 'Unavailable: ' + (err.message || 'Network error');
+            el.classList.add('error');
+          });
+      })();
+      if (syncBtn && syncStatus && syncServiceUrl && apiUrl) {
         syncBtn.addEventListener('click', function() {
+          var token = getToken();
+          if (!token || !tokenVerified) return;
+          var v = versionSelect ? versionSelect.value : '';
           syncBtn.disabled = true;
           syncStatus.textContent = 'Syncing…';
           syncStatus.classList.remove('error');
           var params = new URLSearchParams({ project_id: String(project), api_url: apiUrl, token: token, launch_app: 'true', database_name: databaseName });
-          if (versionId) params.set('version_id', versionId);
+          if (v) params.set('version_id', v);
           var fullSyncUrl = syncServiceUrl + '/sync?' + params.toString();
           fetch(fullSyncUrl, { method: 'POST' })
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
@@ -186,6 +405,12 @@ LAUNCHER_TEMPLATE = """
                       }
                       if (s.status === 'finished' && s.result) {
                         var res = s.result;
+                        if (res.status === 'busy') {
+                          syncStatus.textContent = res.message || 'Dataset is being updated. Please try again in a few minutes.';
+                          syncStatus.classList.add('error');
+                          syncBtn.disabled = false;
+                          return;
+                        }
                         syncStatus.textContent = 'Sync done. Opening FiftyOne…';
                         var openUrl = appUrl;
                         if (res.dataset_name) {
@@ -234,15 +459,18 @@ LAUNCHER_TEMPLATE = """
             });
         });
       }
-      var syncToTatorBtn = document.getElementById('sync-to-tator-btn');
-      if (syncToTatorBtn && syncStatus && syncServiceUrl && apiUrl && token && versionId) {
+      if (syncToTatorBtn && syncStatus && syncServiceUrl && apiUrl) {
         syncToTatorBtn.addEventListener('click', function() {
+          var token = getToken();
+          if (!token || !tokenVerified) return;
+          var v = versionSelect && versionSelect.value ? versionSelect.value : '';
+          if (!v) return;
           syncToTatorBtn.disabled = true;
           syncStatus.textContent = 'Pushing to Tator…';
           syncStatus.classList.remove('error');
           var params = new URLSearchParams({
             project_id: String(project),
-            version_id: versionId,
+            version_id: v,
             api_url: apiUrl,
             token: token,
             database_name: databaseName
@@ -269,7 +497,7 @@ LAUNCHER_TEMPLATE = """
               syncStatus.textContent = 'Sync to Tator error: ' + (err.message || 'Network error');
               syncStatus.classList.add('error');
             })
-            .finally(function() { syncToTatorBtn.disabled = false; });
+            .finally(function() { setVersionFromDropdown(); });
         });
       }
     })();
@@ -302,11 +530,49 @@ async def message_template() -> HTMLResponse:
 async def render_launcher() -> HTMLResponse:
     """
     Return Jinja2 template for HostedTemplate. Tator fetches this URL and renders with tparams.
-    Required tparams: project (Tator project ID). Optional: iframe_host (host for app URL), base_port (5151), ports_per_project (10).
-    "Open FiftyOne" opens the app in a new window. For "Sync from Tator" set: sync_service_url, api_url, token.
-    Port = base_port + (project - 1) * ports_per_project.
+    Required tparams: project (Tator project ID). Optional: iframe_host (host for app URL), base_port (5151), project_name (for embedding status).
+    "Open FiftyOne" opens the app in a new window. For sync: set sync_service_url and api_url; the user enters their Tator API token in the applet and clicks "Test token" to enable Sync from Tator / Sync to Tator.
+    Embedding service status: server uses FASTVSS_API_URL; applet calls GET /embedding-projects to show availability and project registration.
+    Port = base_port + (project - 1).
     """
     return HTMLResponse(LAUNCHER_TEMPLATE)
+
+
+def _token_from_authorization(authorization: str | None) -> str | None:
+    """Extract raw token from Authorization header (Token <token> or Bearer <token>)."""
+    if not authorization or not authorization.strip():
+        return None
+    s = authorization.strip()
+    if s.lower().startswith("token "):
+        return s[6:].strip()
+    if s.lower().startswith("bearer "):
+        return s[7:].strip()
+    return s
+
+
+@app_launch.get("/versions")
+async def get_versions(
+    project_id: int = Query(..., description="Tator project ID"),
+    api_url: str = Query(..., description="Tator REST API base URL"),
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> list[dict]:
+    """
+    Return list of Tator versions for the given project. Used by the launcher template
+    to populate the version dropdown. Token must be sent via Authorization header
+    (e.g. "Token <token>") and is not accepted in the URL.
+    """
+    import tator
+
+    token = _token_from_authorization(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    host = api_url.rstrip("/")
+    try:
+        api = tator.get_api(host, token)
+        version_list = api.get_version_list(project_id)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail=str(e)) from e
+    return [{"id": v.id, "name": v.name, "number": v.number} for v in version_list]
 
 
 @app_launch.get("/launch")
@@ -378,6 +644,14 @@ async def sync(
         config_path=config_path,
         launch_app=launch_app,
     )
+    if result.get("status") == "busy":
+        raise HTTPException(
+            status_code=409,
+            detail=result.get(
+                "message",
+                "This dataset is being updated by another sync. Please try again in a few minutes.",
+            ),
+        )
     result["port"] = port
     return result
 
@@ -402,7 +676,7 @@ async def sync_to_tator(
     api_url: str = Query(..., description="Tator REST API base URL"),
     token: str = Query(..., description="Tator API token"),
     database_name: str | None = Query(None),
-    dataset_name: str | None = Query(None, description="FiftyOne dataset name (default: tator_project_{id})"),
+    dataset_name: str | None = Query(None, description="FiftyOne dataset name (default: get_project(project_id).name + '_' + version name)"),
     label_attr: str = Query("Label", description="Tator attribute name for label"),
     score_attr: str | None = Query(None, description="Tator attribute name for score/confidence; omit or empty to skip"),
     debug: bool = Query(False, description="Print per-sample SKIP/UPDATE debug (or set FIFTYONE_SYNC_DEBUG=1)"),

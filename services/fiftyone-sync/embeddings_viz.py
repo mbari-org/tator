@@ -1,8 +1,8 @@
 """
 Compute embeddings and UMAP visualization for FiftyOne datasets with caching.
 
-Embeddings are fetched from the embed service at http://doris.shore.mbari.org:8000/embed/{project}
-where project is the Tator project name (api.get_project(project_id).name).
+Embeddings are fetched from the embed service at {base}/embed/{project}
+where project is typically the Tator project ID (sync passes str(project_id) by default; config can override).
 UMAP requires umap-learn (see requirements.txt).
 """
 
@@ -81,18 +81,18 @@ def _compute_embeddings_via_service(
     all_embeddings = []
     with httpx.Client(timeout=60.0) as client:
         for start in range(0, len(bytes_list), batch_size):
-            print(f"=====>[embeddings] Processing batch {start // batch_size + 1} of {len(bytes_list) // batch_size}")
+            print(f"[embeddings] Processing batch {start // batch_size + 1} of {len(bytes_list) // batch_size}")
             batch = bytes_list[start : start + batch_size]
             files = [("files", (f"img_{i}.jpg", data)) for i, data in enumerate(batch)]
             url = f"{base}/embed/{project_name}"
             resp = client.post(url, files=files)
             resp.raise_for_status()
             data = resp.json()
-            print(f"=====>[embeddings] Response: {data}")
+            print(f"[embeddings] Response: {data}")
 
             job_id = data.get("job_id")
             if job_id:
-                print(f"=====>Polling [embeddings] Job ID: {job_id}")
+                print(f"[embeddings] Polling Job ID: {job_id}")
                 # Poll GET /predict/job/{job_id}/{project_name} until status == "done", then use result.embeddings
                 poll_url = f"{base}/predict/job/{job_id}/{project_name}"
                 deadline = time.monotonic() + poll_timeout
@@ -100,12 +100,12 @@ def _compute_embeddings_via_service(
                     r = client.get(poll_url)
                     r.raise_for_status()
                     out = r.json()
-                    print(f'=====>[embeddings] Poll response: {out.get("status")}')
+                    print(f'[embeddings] Poll response: {out.get("status")}')
                     if out.get("status") == "done":
                         result = out.get("result") or {}
                         emb = result.get("embeddings") or out.get("embeddings")
                         if isinstance(emb, list) and len(emb) > 0:
-                            print(f"=====>[embeddings] Embeddings: {emb}")
+                            print(f"[embeddings] Embeddings: {emb}")
                             all_embeddings.extend(
                                 emb if isinstance(emb[0], (list, tuple)) else [emb]
                             )
@@ -175,7 +175,7 @@ def compute_embeddings_and_viz(
         force_embeddings: If True, recompute embeddings even if they exist
         force_umap: If True, recompute UMAP even if it exists
         batch_size: Batch size for embed service requests (default 32)
-        project_name: Tator project name for embed service path (required when using service)
+        project_name: Project key for embed service URL path (usually project ID; required when using service)
         service_url: Base URL for embed service (default FASTVSS_API_URL or http://localhost:8000)
     """
     import fiftyone as fo

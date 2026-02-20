@@ -9,8 +9,8 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
   - `GET /embed/{uuid}` - Poll for results (proxies to Fast-VSS `/predict/job/{job_id}/{project}`)
   - Set `FASTVSS_API_URL` env var to override Fast-VSS base URL
 
-- **Port isolation**: One FiftyOne App instance per Tator project
-  - Port = 5151 + project_id
+- **Port isolation**: One FiftyOne App instance per Tator project (one port per project)
+  - Port = 5151 + (project_id - 1)
 
 - **MongoDB database isolation**: Each project uses its own FiftyOne (MongoDB) database by default
   - Default: database name = `{FIFTYONE_DATABASE_DEFAULT}_{project_id}` (env `FIFTYONE_DATABASE_DEFAULT` defaults to `fiftyone_project`, so e.g. `fiftyone_project_1`, `fiftyone_project_2`)
@@ -19,11 +19,12 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
 
 - **Launcher**: HostedTemplate integration
   - `GET /message` - Minimal template with single `{{ message }}` (for simple Hosted Template testing)
-  - `GET /render` - Launcher template with **Open FiftyOne** (opens app in new window) and **Sync from Tator** (tparams: project, iframe_host, base_port, sync_service_url, api_url, token)
+  - `GET /render` - Launcher template with **Open FiftyOne** (opens app in new window) and **Sync from Tator** (tparams: project, iframe_host, base_port, sync_service_url, api_url; user enters API token in the applet and clicks "Test token" to enable sync)
   - `GET /launch` - Allocate port, return FiftyOne App URL
   - `POST /sync` - Trigger Tator-to-FiftyOne sync: fetch media + localizations, crop, build FiftyOne dataset, launch app (requires fiftyone + tator). When Redis is configured, the job is **queued** and the UI stays responsive; poll `GET /sync/status/{job_id}` for completion.
   - `GET /sync/status/{job_id}` - Poll status of a queued sync job (when using Redis).
   - `POST /sync-to-tator` - Push FiftyOne dataset edits (labels, confidence) back to Tator localizations
+  - `GET /versions` - Return Tator versions for a project (query params: `project_id`, `api_url`; token via `Authorization: Token <token>` header only)
   - FiftyOne opens in a **new browser tab** (not in an iframe). Set **`iframe_host`** to the host where the FiftyOne app runs so the Open FiftyOne URL is correct (e.g. same host as Tator or `localhost`).
 
 - **Background sync (Redis)**: For projects with millions of localizations, sync can run for a long time. To avoid blocking the web UI, use the **Redis queue** (same as the Tator compose stack). Set `REDIS_HOST=redis` (or your Redis host) for the API; run the sync worker with the same Redis and env (MongoDB, etc.): `python sync_worker.py`. The launcher will then enqueue sync on click and poll until the worker finishes. Redis env: `REDIS_HOST`, `REDIS_PORT` (default `6379`), `REDIS_PASSWORD`, `REDIS_USE_SSL`; or a single `REDIS_URL` (e.g. `redis://host:6380/0`).
@@ -108,7 +109,7 @@ If Redis is not configured, `GET /sync/status/{job_id}` returns 503 (no queue). 
 
 ## Hosted Template applet (recommended)
 
-This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template and renders it with template parameters. The dashboard shows **Open FiftyOne** (opens the app in a new tab) and **Sync from Tator** (when sync_service_url, api_url, token are set).
+This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template and renders it with template parameters. The dashboard shows **Open FiftyOne** (opens the app in a new tab) and sync controls (when sync_service_url and api_url are set). Users enter their Tator API token in the applet and click **Test token** to verify it; the Version dropdown and **Sync from Tator** / **Sync to Tator** buttons then become enabled.
 
 ### 1. Register the Hosted Template (organization level)
 
@@ -125,7 +126,7 @@ This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.
      - `iframe_host`: host for the FiftyOne app URL when opening in a new tab. **Use the same host you use to open Tator.** If you open Tator at `http://134.89.17.13:8080`, set `iframe_host` to `134.89.17.13` so the app URL is `http://134.89.17.13:5181/...`. If you use `localhost`, the app will try to load from the user’s machine (connection refused when Tator is opened from another host). Do **not** use `host.docker.internal` (browsers cannot resolve it).
      - `message`: optional header text (if set, replaces the default status line)
      - `config_yaml`: optional YAML config string for FiftyOne; shown in the header and exposed as `window.FIFTYONE_CONFIG_YAML` for scripts
-     - **Sync from Tator**: set `sync_service_url`, `api_url`, and `token`; optional `version_id`. When set, clicking it runs POST /sync and then opens FiftyOne in a new tab.
+     - **Sync from Tator / Sync to Tator**: set `sync_service_url` and `api_url` (do **not** set a token tparam). In the applet, the user enters their Tator API token in the password field and clicks **Test token**; once the token is verified, the Version dropdown is filled and **Sync from Tator** / **Sync to Tator** are enabled. Optionally set **version_id** to preselect a version. The token is used only in the browser for sync and is not stored.
 
 Click **Save**.
 
@@ -158,7 +159,7 @@ Go to the project, then **Analytics** → **Dashboards**. Open the applet. Click
 | **sync_service_url** | `http://localhost:8001` | Required for the "Sync from Tator" button; same machine as Tator from the user's perspective. |
 | **api_url** | `http://localhost:8080` | Sync service calls Tator's API; from the host, Tator is at localhost:8080. |
 
-There is no template parameter named **host**; the **URL** field is where Tator fetches the template from. Set **token** (Tator API token) for the "Sync from Tator" button.
+There is no template parameter named **host**; the **URL** field is where Tator fetches the template from. Do **not** set a token tparam; users enter their Tator API token in the applet and click **Test token** to enable sync. The version list and sync requests use the token in the `Authorization` header (for `/versions`) or in the request (for sync); the token is not stored.
 
 ### Tator in Docker: "Connection refused" and "host.docker.internal server IP address not found"
 
@@ -189,7 +190,7 @@ Set `FIFTYONE_DATABASE_URI=mongodb://localhost:27017` (or override).
 
 ## Database and port allocation
 
-Single MongoDB; each Tator project gets its own database for isolation. Up to 10 FiftyOne App ports are blocked per project for future multi-user expansion: project 1 → 5151-5160, project 2 → 5161-5170, etc. The first port in each block is used.
+Single MongoDB; each Tator project gets its own database for isolation. One port per project: project 1 → 5151, project 2 → 5152, etc. (see `port_manager.BASE_PORT`).
 
 | Env var | Purpose |
 |--------|---------|
@@ -215,7 +216,7 @@ Optional query param **`database_name`** on `GET /launch` and `POST /sync` overr
 | `config_path` | no | Path to YAML/JSON config file for dataset build |
 | `launch_app` | no | Launch FiftyOne app after sync (default: true) |
 
-**Sync-from-Tator flow (dashboard):** The launcher template calls `POST /sync`, then opens the FiftyOne app in a new tab. The frontend opens the **dataset URL** (e.g. `http://host:port/datasets/tator_project_4`) using `dataset_name` from the response so the App loads the synced dataset directly. A short delay (~1.2s) before opening gives the FiftyOne server time to serve the correct session state ([Session lifecycle](https://docs.voxel51.com/api/fiftyone.core.session.session.html)). After launch we call `session.refresh()` so the first client connection receives the current dataset.
+**Sync-from-Tator flow (dashboard):** The launcher template calls `POST /sync`, then opens the FiftyOne app in a new tab. The frontend opens the **dataset URL** (e.g. `http://host:port/datasets/MyProject_MyVersion`) using `dataset_name` from the response so the App loads the synced dataset directly. The default dataset name is `get_project(project_id).name + "_" + version_name` (from the Tator API). A short delay (~1.2s) before opening gives the FiftyOne server time to serve the correct session state ([Session lifecycle](https://docs.voxel51.com/api/fiftyone.core.session.session.html)). After launch we call `session.refresh()` so the first client connection receives the current dataset.
 
 ### Config file (YAML/JSON)
 
@@ -230,7 +231,7 @@ max_samples: 500                         # optional: limit for testing
 
 ### Embeddings and UMAP visualization
 
-You can optionally compute **embeddings** and a **UMAP** 2D visualization after the dataset is built. Embeddings are fetched from the **embed service** at `http://localhost:8000/embeddings/{project}/`, where `{project}` is the **Tator project name** from `api.get_project(project_id).name`. Add an `embeddings` block to your config and pass it via `config_path`:
+You can optionally compute **embeddings** and a **UMAP** 2D visualization after the dataset is built. Embeddings are fetched from the **embed service** at `{service_url}/embed/{project}`. By default `{project}` is the **Tator project ID** (many services expect this). Set `embeddings.project_name` in config to use a project name or other key instead. Add an `embeddings` block to your config and pass it via `config_path`:
 
 ```yaml
 embeddings:
@@ -241,6 +242,7 @@ embeddings:
   force_umap: false                   # set true to recompute UMAP
   batch_size: 32                     # batch size for embed service requests
   service_url: null                   # optional; default FASTVSS_API_URL or http://localhost:8000
+  project_name: null                  # optional; override for embed service URL path (default: project_id)
 ```
 
 **Requirements:** The embed service must be running (e.g. Fast-VSS at the URL above). Set `FASTVSS_API_URL` to override the base URL. For UMAP visualization, install `umap-learn` in the sync service venv:
@@ -269,7 +271,7 @@ Labels come from `attributes.Label` (or `attributes.label`) in localizations.
 | `version_id` | yes | Tator version ID (localizations must be in this version) |
 | `api_url` | yes | Tator REST API base URL |
 | `token` | yes | Tator API token |
-| `dataset_name` | no | FiftyOne dataset name (default: `tator_project_{id}`) |
+| `dataset_name` | no | FiftyOne dataset name (default: `get_project(project_id).name + "_" + version name`) |
 
 ```bash
 curl -X POST "http://localhost:8001/sync-to-tator?project_id=4&version_id=1&api_url=https://tator.example.com&token=YOUR_TOKEN"

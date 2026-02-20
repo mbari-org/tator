@@ -25,6 +25,7 @@ import tator
 import yaml
 from PIL import Image
 from port_manager import get_database_name, get_database_uri, get_port_for_project, get_session
+from sync_lock import get_sync_lock_key, release_sync_lock, try_acquire_sync_lock
 
 CHUNK_SIZE = 200
 
@@ -553,7 +554,7 @@ def _create_sample_from_loc(
     if api_url and project_id is not None:
         tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
         if tator_url:
-            sample["url"] = tator_url
+            sample["annotation"] = tator_url
     sample.tags.append(label)
     attrs = loc.get("attributes") or {}
     score = attrs.get("Score") or attrs.get("score")
@@ -687,7 +688,7 @@ def build_fiftyone_dataset_from_crops(
 
     # Load localizations index by elemental_id
     loc_index = _load_localizations_index(localizations_jsonl_path)
-    print(f"[sync] ----->loc_index={loc_index}", flush=True)
+    print(f"[sync] loc_index={loc_index}", flush=True)
     print("Loaded %s localizations from JSONL", len(loc_index))
     print(f"[sync] Loaded {len(loc_index)} localizations from JSONL", flush=True)
 
@@ -721,12 +722,12 @@ def build_fiftyone_dataset_from_crops(
             api_url = config.get("source_url")
             project_id = config.get("project_id")
             version_id = config.get("version_id")
-            print(f"[sync] ----->loc={loc} api_url={api_url} project_id={project_id} version_id={version_id}", flush=True)
+            print(f"[sync] loc={loc} api_url={api_url} project_id={project_id} version_id={version_id}", flush=True)
             if loc and api_url and project_id is not None:
                 tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
                 if tator_url:
-                    sample["url"] = tator_url
-                    print(f"[sync] ----->tator_url={tator_url}", flush=True)
+                    sample["annotation"] = tator_url
+                    print(f"[sync] tator_url={tator_url}", flush=True)
             sample.tags.append(label)
             if loc:
                 attrs = loc.get("attributes") or {}
@@ -745,25 +746,23 @@ def build_fiftyone_dataset_from_crops(
     print(f"[sync] Collected {len(samples)} samples for dataset", flush=True)
 
     # Handle existing dataset: always reconcile, never delete
-    if dataset_name in fo.list_datasets():
-        # Delete the dataset if it exists
-        fo.delete_dataset(dataset_name)
-        # print(f"[sync] --------->Reconcile: loading dataset {dataset_name}", flush=True)
-        # dataset = fo.load_dataset(dataset_name)
-        # dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
-        # dataset = reconcile_dataset_with_tator(
-        #     dataset=dataset,
-        #     loc_index=loc_index,
-        #     crops_dir=crops_dir,
-        #     download_dir=download_dir,
-        #     config=config,
-        #     image_extensions=image_extensions,
-        #     max_samples=max_samples,
-        # )
-        # print(f"[sync] --------->Reconcile: dataset {dataset_name} loaded", flush=True)
-        # return dataset
+    if dataset_name in fo.list_datasets(): 
+        print(f"[sync] Reconcile: loading dataset {dataset_name}", flush=True)
+        dataset = fo.load_dataset(dataset_name)
+        dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
+        dataset = reconcile_dataset_with_tator(
+            dataset=dataset,
+            loc_index=loc_index,
+            crops_dir=crops_dir,
+            download_dir=download_dir,
+            config=config,
+            image_extensions=image_extensions,
+            max_samples=max_samples,
+        )
+        print(f"[sync] Reconcile: dataset {dataset_name} loaded", flush=True)
+        return dataset
 
-    print(f"[sync] --------->Reconcile: creating new dataset {dataset_name}", flush=True)
+    print(f"[sync] Reconcile: creating new dataset {dataset_name}", flush=True)
     dataset = fo.Dataset(dataset_name)
     dataset.persistent = True  # Persist dataset in MongoDB after session ends
     dataset.add_samples(samples)
@@ -773,6 +772,33 @@ def build_fiftyone_dataset_from_crops(
 
 DEFAULT_LABEL_ATTR = "Label"
 DEFAULT_SCORE_ATTR = "score"
+
+
+def _sanitize_dataset_name(name: str) -> str:
+    """Make a string safe for use as a FiftyOne/MongoDB dataset name."""
+    if not name:
+        return "default"
+    # Replace anything that isn't alphanumeric, underscore, or hyphen with underscore
+    s = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(name).strip())
+    return re.sub(r"_+", "_", s).strip("_") or "default"
+
+
+def _default_dataset_name(api: Any, project_id: int, version_id: int | None) -> str:
+    """Default FiftyOne dataset name: project.name + '_' + version_name (from Tator API)."""
+    try:
+        project = api.get_project(project_id)
+        project_name = _sanitize_dataset_name(project.name) if project.name else f"project_{project_id}"
+    except Exception:
+        project_name = f"project_{project_id}"
+    if version_id is not None:
+        try:
+            version = api.get_version(version_id)
+            version_name = _sanitize_dataset_name(version.name) if version.name else f"v{version_id}"
+        except Exception:
+            version_name = f"v{version_id}"
+    else:
+        version_name = "default"
+    return f"{project_name}_{version_name}"
 
 
 def sync_edits_to_tator(
@@ -798,7 +824,9 @@ def sync_edits_to_tator(
     os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
     os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
-    ds_name = dataset_name or f"tator_project_{project_id}"
+    host = api_url.rstrip("/")
+    api = tator.get_api(host, token)
+    ds_name = dataset_name or _default_dataset_name(api, project_id, version_id)
     fallback_db = f"{os.environ.get('FIFTYONE_DATABASE_DEFAULT', 'fiftyone_project')}_{project_id}"
     if ds_name not in fo.list_datasets():
         if resolved_db != fallback_db:
@@ -812,8 +840,6 @@ def sync_edits_to_tator(
             )
 
     dataset = fo.load_dataset(ds_name)
-    host = api_url.rstrip("/")
-    api = tator.get_api(host, token)
 
     updated = 0
     failed = 0
@@ -917,186 +943,200 @@ def sync_project_to_fiftyone(
     fo.config.database_name = resolved_db
     print(f"[sync] database_uri={fo.config.database_uri} database_name={resolved_db}", flush=True)
 
-    media_ids_list: list[int] = []
-    tmp_dir = ""
-    localizations_path = ""
-    crops_dir = ""
-    try:
-        host = api_url.rstrip("/")
-        api = tator.get_api(host, token)
-        print(f"[sync] Fetching media IDs... {host} {token} {project_id} {api_url}", flush=True)
-        media_ids_list = fetch_project_media_ids(api_url, token, project_id)
-        if not media_ids_list:
-            print(f"[sync] No media IDs for project {project_id}", flush=True)
-            print("No media IDs found for project %s; skipping download", project_id)
-        else:
-            print("media_ids:", media_ids_list, flush=True)
-            print(f"[sync] Getting media objects in chunks...", flush=True)
-            all_media = get_media_chunked(api, project_id, media_ids_list)
-            if not all_media:
-                print(f"[sync] No Media objects for {len(media_ids_list)} ids", flush=True)
-                print("No Media objects returned for %s ids; skipping download", len(media_ids_list))
-            else:
-                print(f"[sync] Saving {len(all_media)} media to tmp...", flush=True)
-                tmp_dir = save_media_to_tmp(api, project_id, all_media)
-                if tmp_dir:
-                    print("saved_media_dir:", tmp_dir, flush=True)
-        print(f"[sync] Fetching localizations...", flush=True)
-        localizations_path = fetch_and_save_localizations(
-            api, project_id, version_id=version_id, media_ids=media_ids_list or None
-        )
-        if localizations_path:
-            print(f"[sync] saved_localizations_path (JSONL): {localizations_path}", flush=True)
-        if tmp_dir and localizations_path:
-            crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
-            crop_localizations_parallel(tmp_dir, localizations_path, crops_dir, size=224)
-    except Exception as e:
-        print("fetch/save media or localizations failed: %s", e)
-        print(f"[sync] Error: {e}", flush=True)
+    lock_key = get_sync_lock_key(resolved_db, project_id, version_id)
+    if not try_acquire_sync_lock(lock_key):
         return {
-            "status": "error",
-            "message": str(e),
+            "status": "busy",
+            "message": "This dataset is being updated by another sync. Please try again in a few minutes.",
             "database_name": resolved_db,
-            "saved_media_dir": tmp_dir or None,
-            "saved_localizations_path": localizations_path or None,
-            "saved_crops_dir": crops_dir or None,
         }
 
-    if not crops_dir or not localizations_path:
-        print(f"[sync] No crops or localizations; skipping dataset build", flush=True)
+    try:
+        media_ids_list: list[int] = []
+        tmp_dir = ""
+        localizations_path = ""
+        crops_dir = ""
+        try:
+            host = api_url.rstrip("/")
+            api = tator.get_api(host, token)
+            print(f"[sync] Fetching media IDs... {host} {token} {project_id} {api_url}", flush=True)
+            media_ids_list = fetch_project_media_ids(api_url, token, project_id)
+            if not media_ids_list:
+                print(f"[sync] No media IDs for project {project_id}", flush=True)
+                print("No media IDs found for project %s; skipping download", project_id)
+            else:
+                print("media_ids:", media_ids_list, flush=True)
+                print(f"[sync] Getting media objects in chunks...", flush=True)
+                all_media = get_media_chunked(api, project_id, media_ids_list)
+                if not all_media:
+                    print(f"[sync] No Media objects for {len(media_ids_list)} ids", flush=True)
+                    print("No Media objects returned for %s ids; skipping download", len(media_ids_list))
+                else:
+                    print(f"[sync] Saving {len(all_media)} media to tmp...", flush=True)
+                    tmp_dir = save_media_to_tmp(api, project_id, all_media)
+                    if tmp_dir:
+                        print("saved_media_dir:", tmp_dir, flush=True)
+            print(f"[sync] Fetching localizations...", flush=True)
+            localizations_path = fetch_and_save_localizations(
+                api, project_id, version_id=version_id, media_ids=media_ids_list or None
+            )
+            if localizations_path:
+                print(f"[sync] saved_localizations_path (JSONL): {localizations_path}", flush=True)
+            if tmp_dir and localizations_path:
+                crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
+                crop_localizations_parallel(tmp_dir, localizations_path, crops_dir, size=224)
+        except Exception as e:
+            print("fetch/save media or localizations failed: %s", e)
+            print(f"[sync] Error: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "database_name": resolved_db,
+                "saved_media_dir": tmp_dir or None,
+                "saved_localizations_path": localizations_path or None,
+                "saved_crops_dir": crops_dir or None,
+            }
+
+        if not crops_dir or not localizations_path:
+            print(f"[sync] No crops or localizations; skipping dataset build", flush=True)
+            return {
+                "status": "ok",
+                "message": "No crops to load; media/localizations missing or empty",
+                "database_name": resolved_db,
+                "dataset_name": None,
+                "saved_media_dir": tmp_dir or None,
+                "saved_localizations_path": localizations_path or None,
+                "saved_crops_dir": crops_dir or None,
+            }
+
+        # Load config from YAML/JSON if provided
+        config: dict[str, Any] = {}
+        if config_path and os.path.exists(config_path):
+            try:
+                config = _load_config(config_path)
+                print(f"[sync] Loaded config from {config_path}", flush=True)
+            except Exception as e:
+                print("Failed to load config %s: %s", config_path, e)
+                print(f"[sync] Config load failed: {e}", flush=True)
+
+        # Inject Tator base URL and ids so sample "url" can link to the localization's media page
+        config["source_url"] = api_url.rstrip("/")
+        config["project_id"] = project_id
+        config["version_id"] = version_id
+
+        dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
+
+        # Set env so FiftyOne app subprocess uses the same database
+        os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+        os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+
+        try:
+            print(f"[sync] Building dataset {dataset_name}", flush=True)
+            dataset = build_fiftyone_dataset_from_crops(
+                crops_dir=crops_dir,
+                localizations_jsonl_path=localizations_path,
+                dataset_name=dataset_name,
+                config=config,
+                download_dir=tmp_dir or None,
+            )
+        except Exception as e:
+            print("Dataset build failed: %s", e)
+            print(f"[sync] Dataset build failed: {e}", flush=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "database_name": resolved_db,
+                "dataset_name": None,
+                "saved_media_dir": tmp_dir or None,
+                "saved_localizations_path": localizations_path or None,
+                "saved_crops_dir": crops_dir or None,
+            }
+
+        print(f"[sync] sync_project_to_fiftyone done: dataset={dataset_name}", flush=True)
+        print(
+            "sync_project_to_fiftyone: project=%s port=%s database=%s dataset=%s",
+            project_id, port, resolved_db, dataset_name,
+        )
+
+        sample_count = len(dataset)
+        print(f"[sync] Dataset '{dataset_name}' has {sample_count} samples", flush=True)
+
+        # Always compute embeddings (from service) and UMAP; config.embeddings overrides defaults
+        embeddings_config = config.get("embeddings") or {}
+        if not isinstance(embeddings_config, dict):
+            embeddings_config = {}
+        # Resolve project key for embed service URL path. Many services expect project ID, not project name.
+        # Prefer config override, then use project_id (service often expects this), else project name as fallback.
+        embed_project_key = embeddings_config.get("project_name")
+        if embed_project_key is not None and str(embed_project_key).strip():
+            embed_project_key = str(embed_project_key).strip()
+        else:
+            # Default: use project ID so embed service (e.g. doris) receives a valid key; it often rejects project name.
+            embed_project_key = str(project_id)
+
+        # Do not change this; it is the project key for the embed service for testing
+        embed_project_key = "500055-VARS"
+        if embed_project_key:
+            model_info = {
+                "embeddings_field": embeddings_config.get("embeddings_field", "embeddings"),
+                "brain_key": embeddings_config.get("brain_key", "umap_viz"),
+            }
+            try:
+                from embeddings_viz import compute_embeddings_and_viz
+
+                compute_embeddings_and_viz(
+                    dataset,
+                    model_info,
+                    umap_seed=int(embeddings_config.get("umap_seed", 51)),
+                    force_embeddings=bool(embeddings_config.get("force_embeddings", False)),
+                    force_umap=bool(embeddings_config.get("force_umap", False)),
+                    batch_size=embeddings_config.get("batch_size"),
+                    project_name=embed_project_key,
+                    service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
+                )
+                print(f"[sync] Embeddings and UMAP completed for dataset '{dataset_name}'", flush=True)
+            except ImportError as e:
+                print(f"[sync] Skipping embeddings/UMAP (missing deps): {e}", flush=True)
+            except Exception as e:
+                print(f"[sync] Embeddings/UMAP failed (dataset still available): {e}", flush=True)
+                logging.getLogger(__name__).exception("Embeddings/UMAP failed")
+        else:
+            print("[sync] No embed project key; skipping embeddings/UMAP", flush=True)
+
+        if launch_app:
+            # Reload dataset from MongoDB so the server (which loads from DB) sees the same state
+            try:
+                dataset.reload()
+                sample_count = len(dataset)
+                print(f"[sync] Reloaded dataset from DB: {sample_count} samples", flush=True)
+            except Exception as e:
+                logging.getLogger(__name__).debug("Dataset reload before launch: %s", e)
+            print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
+            # _stop_process_on_port(port)
+            session = _launch_app_embedded(dataset, port)
+            # Push state immediately so the server has the correct dataset
+            try:
+                session.refresh()
+            except Exception as e:
+                logging.getLogger(__name__).debug("Session refresh after launch: %s", e)
+            # Give the FiftyOne server time to start and accept state before the browser connects
+            time.sleep(10)
+            try:
+                session.refresh()
+            except Exception as e:
+                logging.getLogger(__name__).debug("Session refresh (delayed): %s", e)
+
         return {
             "status": "ok",
-            "message": "No crops to load; media/localizations missing or empty",
+            "dataset_name": dataset_name,
             "database_name": resolved_db,
-            "dataset_name": None,
+            "sample_count": sample_count,
             "saved_media_dir": tmp_dir or None,
             "saved_localizations_path": localizations_path or None,
             "saved_crops_dir": crops_dir or None,
         }
-
-    # Load config from YAML/JSON if provided
-    config: dict[str, Any] = {}
-    if config_path and os.path.exists(config_path):
-        try:
-            config = _load_config(config_path)
-            print(f"[sync] Loaded config from {config_path}", flush=True)
-        except Exception as e:
-            print("Failed to load config %s: %s", config_path, e)
-            print(f"[sync] Config load failed: {e}", flush=True)
-
-    # Inject Tator base URL and ids so sample "url" can link to the localization's media page
-    config["source_url"] = api_url.rstrip("/")
-    config["project_id"] = project_id
-    config["version_id"] = version_id
-
-    dataset_name = config.get("dataset_name") or f"tator_project_{project_id}" 
-
-    # Set env so FiftyOne app subprocess uses the same database
-    os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
-    os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
-
-    try:
-        print(f"[sync] --------->Building dataset {dataset_name}", flush=True)
-        dataset = build_fiftyone_dataset_from_crops(
-            crops_dir=crops_dir,
-            localizations_jsonl_path=localizations_path,
-            dataset_name=dataset_name,
-            config=config,
-            download_dir=tmp_dir or None,
-        )
-    except Exception as e:
-        print("Dataset build failed: %s", e)
-        print(f"[sync] Dataset build failed: {e}", flush=True)
-        return {
-            "status": "error",
-            "message": str(e),
-            "database_name": resolved_db,
-            "dataset_name": None,
-            "saved_media_dir": tmp_dir or None,
-            "saved_localizations_path": localizations_path or None,
-            "saved_crops_dir": crops_dir or None,
-        }
-
-    print(f"[sync] sync_project_to_fiftyone done: dataset={dataset_name}", flush=True)
-    print(
-        "sync_project_to_fiftyone: project=%s port=%s database=%s dataset=%s",
-        project_id, port, resolved_db, dataset_name,
-    )
-
-    sample_count = len(dataset)
-    print(f"[sync] Dataset '{dataset_name}' has {sample_count} samples", flush=True)
-
-    # Always compute embeddings (from service) and UMAP; config.embeddings overrides defaults
-    embeddings_config = config.get("embeddings") or {}
-    if not isinstance(embeddings_config, dict):
-        embeddings_config = {}
-    try:
-        api = tator.get_api(api_url.rstrip("/"), token)
-        project = api.get_project(project_id)
-        project_name = project.name
-        project_name = "500055-VARS"
-    except Exception as e:
-        print(f"[sync] Could not get Tator project name for embeddings: {e}", flush=True)
-        project_name = None
-    if project_name:
-        model_info = {
-            "embeddings_field": embeddings_config.get("embeddings_field", "embeddings"),
-            "brain_key": embeddings_config.get("brain_key", "umap_viz"),
-        }
-        try:
-            from embeddings_viz import compute_embeddings_and_viz
-
-            compute_embeddings_and_viz(
-                dataset,
-                model_info,
-                umap_seed=int(embeddings_config.get("umap_seed", 51)),
-                force_embeddings=bool(embeddings_config.get("force_embeddings", False)),
-                force_umap=bool(embeddings_config.get("force_umap", False)),
-                batch_size=embeddings_config.get("batch_size"),
-                project_name=project_name,
-                service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
-            )
-            print(f"[sync] Embeddings and UMAP completed for dataset '{dataset_name}'", flush=True)
-        except ImportError as e:
-            print(f"[sync] Skipping embeddings/UMAP (missing deps): {e}", flush=True)
-        except Exception as e:
-            print(f"[sync] Embeddings/UMAP failed (dataset still available): {e}", flush=True)
-            logging.getLogger(__name__).exception("Embeddings/UMAP failed")
-    else:
-        print("[sync] Could not resolve project name; skipping embeddings/UMAP", flush=True)
-
-    if launch_app:
-        # Reload dataset from MongoDB so the server (which loads from DB) sees the same state
-        try:
-            dataset.reload()
-            sample_count = len(dataset)
-            print(f"[sync] Reloaded dataset from DB: {sample_count} samples", flush=True)
-        except Exception as e:
-            logging.getLogger(__name__).debug("Dataset reload before launch: %s", e)
-        print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
-        # _stop_process_on_port(port)
-        session = _launch_app_embedded(dataset, port)
-        # Push state immediately so the server has the correct dataset
-        try:
-            session.refresh()
-        except Exception as e:
-            logging.getLogger(__name__).debug("Session refresh after launch: %s", e)
-        # Give the FiftyOne server time to start and accept state before the browser connects
-        time.sleep(10)
-        try:
-            session.refresh()
-        except Exception as e:
-            logging.getLogger(__name__).debug("Session refresh (delayed): %s", e)
-
-    return {
-        "status": "ok",
-        "dataset_name": dataset_name,
-        "database_name": resolved_db,
-        "sample_count": sample_count,
-        "saved_media_dir": tmp_dir or None,
-        "saved_localizations_path": localizations_path or None,
-        "saved_crops_dir": crops_dir or None,
-    }
+    finally:
+        release_sync_lock(lock_key)
 
 
 def main() -> None:
@@ -1145,7 +1185,7 @@ def main() -> None:
         os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
         config_path = os.getenv("CONFIG_PATH")
         config = _load_config(config_path) if config_path and os.path.exists(config_path) else {}
-        dataset_name = config.get("dataset_name") or f"tator_project_{project_id}"
+        dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
         dataset = build_fiftyone_dataset_from_crops(
             crops_dir=crops_dir,
             localizations_jsonl_path=localizations_path,

@@ -21,6 +21,9 @@ image_extensions:
 # Optional: limit samples for testing
 # max_samples: 500
 
+embeddings:
+  project_name: "500055-VARS" 
+
 # Optional: compute embeddings (from embed service) and UMAP after sync
 # Embeddings come from http://localhost:8000/embeddings/{project}/ where project = Tator project name (get_project(project_id).name).
 # UMAP requires umap-learn. Set FASTVSS_API_URL to override the embed service base URL.

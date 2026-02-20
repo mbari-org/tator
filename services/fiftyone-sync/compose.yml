@@ -1,5 +1,6 @@
 # Single MongoDB for Voxel51 FiftyOne (per-project databases: fiftyone_project_1, fiftyone_project_2, ...)
 # Set FIFTYONE_DATABASE_URI=mongodb://localhost:27017 (or override)
+# Set FASTVSS_API_URL when running fiftyone-sync API/worker (embedding service base URL, e.g. http://localhost:8000)
 #
 # Usage: docker compose -f compose.yml up -d
 #
