@@ -31,7 +31,7 @@ OPERATIONS=reset logs bash
 
 IMAGES=ui-image postgis-image client-image transcode-image
 
-GIT_VERSION=$(shell git rev-parse HEAD)
+GIT_VERSION="c598eeebb06c3adad4d3208ba4d7dccfea9363f1" #$(shell git rev-parse HEAD)
 
 # Get python version and set yaml arguments correctly
 PYTHON3_REVISION=$(shell python3 --version | grep ^Python | sed 's/^.* //g' | awk -F. '{print $$2}')
