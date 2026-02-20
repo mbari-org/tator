@@ -1026,6 +1026,45 @@ def sync_project_to_fiftyone(
     sample_count = len(dataset)
     print(f"[sync] Dataset '{dataset_name}' has {sample_count} samples", flush=True)
 
+    # Always compute embeddings (from service) and UMAP; config.embeddings overrides defaults
+    embeddings_config = config.get("embeddings") or {}
+    if not isinstance(embeddings_config, dict):
+        embeddings_config = {}
+    try:
+        api = tator.get_api(api_url.rstrip("/"), token)
+        project = api.get_project(project_id)
+        project_name = project.name
+        project_name = "500055-VARS"
+    except Exception as e:
+        print(f"[sync] Could not get Tator project name for embeddings: {e}", flush=True)
+        project_name = None
+    if project_name:
+        model_info = {
+            "embeddings_field": embeddings_config.get("embeddings_field", "embeddings"),
+            "brain_key": embeddings_config.get("brain_key", "umap_viz"),
+        }
+        try:
+            from embeddings_viz import compute_embeddings_and_viz
+
+            compute_embeddings_and_viz(
+                dataset,
+                model_info,
+                umap_seed=int(embeddings_config.get("umap_seed", 51)),
+                force_embeddings=bool(embeddings_config.get("force_embeddings", False)),
+                force_umap=bool(embeddings_config.get("force_umap", False)),
+                batch_size=embeddings_config.get("batch_size"),
+                project_name=project_name,
+                service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
+            )
+            print(f"[sync] Embeddings and UMAP completed for dataset '{dataset_name}'", flush=True)
+        except ImportError as e:
+            print(f"[sync] Skipping embeddings/UMAP (missing deps): {e}", flush=True)
+        except Exception as e:
+            print(f"[sync] Embeddings/UMAP failed (dataset still available): {e}", flush=True)
+            logging.getLogger(__name__).exception("Embeddings/UMAP failed")
+    else:
+        print("[sync] Could not resolve project name; skipping embeddings/UMAP", flush=True)
+
     if launch_app:
         # Reload dataset from MongoDB so the server (which loads from DB) sees the same state
         try:

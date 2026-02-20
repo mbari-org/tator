@@ -33,3 +33,6 @@ PyYAML>=6.0
 # Redis queue (optional; when REDIS_HOST set, sync runs in background worker)
 redis>=5.0.0
 rq>=1.15.0
+
+# Optional: for config.embeddings UMAP visualization only (embeddings come from embed service)
+umap-learn>=0.5

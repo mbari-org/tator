@@ -228,6 +228,29 @@ image_extensions: ["*.png", "*.jpg"]
 max_samples: 500                         # optional: limit for testing
 ```
 
+### Embeddings and UMAP visualization
+
+You can optionally compute **embeddings** and a **UMAP** 2D visualization after the dataset is built. Embeddings are fetched from the **embed service** at `http://localhost:8000/embeddings/{project}/`, where `{project}` is the **Tator project name** from `api.get_project(project_id).name`. Add an `embeddings` block to your config and pass it via `config_path`:
+
+```yaml
+embeddings:
+  embeddings_field: embeddings         # field to store embedding vectors
+  brain_key: umap_viz                 # FiftyOne brain key for UMAP
+  umap_seed: 51
+  force_embeddings: false             # set true to recompute embeddings
+  force_umap: false                   # set true to recompute UMAP
+  batch_size: 32                     # batch size for embed service requests
+  service_url: null                   # optional; default FASTVSS_API_URL or http://localhost:8000
+```
+
+**Requirements:** The embed service must be running (e.g. Fast-VSS at the URL above). Set `FASTVSS_API_URL` to override the base URL. For UMAP visualization, install `umap-learn` in the sync service venv:
+
+```bash
+pip install umap-learn
+```
+
+If the embed service is unavailable or UMAP is not installed, sync still runs; embeddings/UMAP are skipped and a message is logged. Embeddings and UMAP results are cached on the dataset; use `force_embeddings` / `force_umap` to recompute.
+
 ### Data layout
 
 - Media: `/tmp/fiftyone_sync_project_{id}/download/{media_id}_{name}.jpg`
