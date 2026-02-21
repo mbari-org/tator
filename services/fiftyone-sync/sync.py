@@ -25,8 +25,24 @@ import tator
 import yaml
 from PIL import Image
 from database_uri_config import database_name_from_uri
-from database_manager import get_database_entry, get_session, get_vss_project
+from database_manager import (
+    get_database_entry,
+    get_database_name,
+    get_database_uri,
+    get_port_for_project,
+    get_session,
+    get_vss_project,
+)
 from sync_lock import get_sync_lock_key, release_sync_lock, try_acquire_sync_lock
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+# logger.info to console
+handler = logging.StreamHandler()
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 CHUNK_SIZE = 200
 
@@ -56,16 +72,16 @@ def _stop_process_on_port(port: int) -> None:
                 pass
         if pids:
             time.sleep(1.5)
-            print(f"[sync] Stopped existing process(es) on port {port} (PIDs: {pids})", flush=True)
+            logger.info(f"Stopped existing process(es) on port {port} (PIDs: {pids})")
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
-        logging.getLogger(__name__).debug("Could not stop process on port %s: %s", port, e)
+        logging.getLogger(__name__).debug(f"Could not stop process on port {port}: {e}")
 
 
 def _launch_app_embedded(dataset: fo.Dataset, port: int):
     """
     Launch FiftyOne app browser tab
     Uses remote=True so FiftyOne does not open a browser; we suppress FiftyOne's
-    SSH port-forwarding message and print a short note for the Tator dashboard instead.
+    SSH port-forwarding message and logger.info a short note for the Tator dashboard instead.
     See https://docs.voxel51.com/installation/environments.html#remote-data
     """
     fo_session_logger = logging.getLogger("fiftyone.core.session.session")
@@ -75,10 +91,9 @@ def _launch_app_embedded(dataset: fo.Dataset, port: int):
         session = fo.launch_app(dataset, port=port, address="0.0.0.0", remote=True)
     finally:
         fo_session_logger.setLevel(old_level)
-    print(
-        f"[sync] FiftyOne app is running on port {port}. "
+    logger.info(
+        f"FiftyOne app is running on port {port}. "
         "Open it in the Tator dashboard at http://<host>:{port})".format(port=port),
-        flush=True,
     )
     return session
 
@@ -112,7 +127,7 @@ def fetch_project_media_ids(
     Fetch all media in the project. Returns list of media ids.
     If media_ids_filter is set, only those media are returned (and must exist in the project).
     """
-    print(f"[sync] fetch_project_media_ids: project_id={project_id} filter={media_ids_filter}", flush=True)
+    logger.info(f"fetch_project_media_ids: project_id={project_id} filter={media_ids_filter}")
     host = api_url.rstrip("/")
     api = tator.get_api(host, token)
     if media_ids_filter:
@@ -120,8 +135,8 @@ def fetch_project_media_ids(
     else:
         media_list = api.get_media_list(project_id)
     media_ids = [m.id for m in media_list]
-    print(f"[sync] fetch_project_media_ids: got {len(media_ids)} ids", flush=True)
-    print("Project %s media count: %s; ids: %s", project_id, len(media_ids), media_ids)
+    logger.info(f"fetch_project_media_ids: got {len(media_ids)} ids")
+    logger.info(f"Project {project_id} media count: {len(media_ids)}; ids: {media_ids}")
     return media_ids
 
 
@@ -130,9 +145,9 @@ def get_media_chunked(api: Any, project_id: int, media_ids: list[int]) -> list[A
     Get media objects in chunks of CHUNK_SIZE. Uses get_media_list_by_id for reliable Media objects.
     Filters out non-Media responses (API quirk). Returns list of tator.models.Media.
     """
-    print(f"[sync] get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={CHUNK_SIZE}", flush=True)
+    logger.info(f"get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={CHUNK_SIZE}")
     if not media_ids:
-        print("[sync] get_media_chunked: no ids, returning []", flush=True)
+        logger.info("get_media_chunked: no ids, returning []")
         return []
     all_media = []
     for start in range(0, len(media_ids), CHUNK_SIZE):
@@ -140,9 +155,9 @@ def get_media_chunked(api: Any, project_id: int, media_ids: list[int]) -> list[A
         media = api.get_media_list_by_id(project_id, {"ids": chunk_ids})
         new_media = [m for m in media if isinstance(m, tator.models.Media)]
         all_media += new_media
-        print(f"[sync] get_media_chunked: start={start} chunk_len={len(new_media)} total_media={len(all_media)}", flush=True)
-    print(f"[sync] get_media_chunked: done, {len(all_media)} Media objects", flush=True)
-    print("get_media_chunked: %s ids -> %s Media objects", len(media_ids), len(all_media))
+        logger.info(f"get_media_chunked: start={start} chunk_len={len(new_media)} total_media={len(all_media)}")
+    logger.info(f"get_media_chunked: done, {len(all_media)} Media objects")
+    logger.info(f"get_media_chunked: {len(media_ids)} ids -> {len(all_media)} Media objects")
     return all_media
 
 
@@ -165,20 +180,17 @@ def save_media_to_tmp(api: Any, project_id: int, media_objects: list[Any]) -> st
     os.makedirs(out_dir, exist_ok=True)
     valid = [m for m in media_objects if isinstance(m, tator.models.Media)]
     total = len(valid)
-    print("Saving %s media files to %s", total, out_dir)
-    print(f"[sync] Saving {total} media files to {out_dir}", flush=True)
+    logger.info(f"Saving {total} media files to {out_dir}")
     for idx, m in enumerate(valid, 1):
         safe_name = f"{m.id}_{m.name}"
         out_path = os.path.join(out_dir, safe_name)
         if _is_video_name(m.name):
-            print(f"[sync] Skipping video (not supported): {safe_name}", flush=True)
-            print("Skipping video %s", m.id)
+            logger.info(f"Skipping video (not supported): {safe_name}")
             continue
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            print(f"[sync] Skipping existing: {safe_name}", flush=True)
-            print("Skipping existing %s", out_path)
+            logger.info(f"Skipping existing: {safe_name}")
             continue
-        print(f"[sync] Downloading {m.name} to {out_path}", flush=True)
+        logger.info(f"Downloading {m.name} to {out_path}")
         num_tries = 0
         success = False
         while num_tries < 3 and not success:
@@ -186,16 +198,13 @@ def save_media_to_tmp(api: Any, project_id: int, media_objects: list[Any]) -> st
                 for _ in tator.util.download_media(api, m, out_path):
                     pass
                 success = True
-                print("Saved %s -> %s", m.id, out_path)
-                print(f"[sync] Saved media {m.id} -> {out_path}", flush=True)
+                logger.info(f"Saved {m.id} -> {out_path}")
             except Exception as e:
-                print(f"[sync] Download attempt {num_tries + 1}/3 failed for {m.id}: {e}", flush=True)
-                print(f"[sync] Attempt {num_tries + 1}/3 failed for {m.id}: {e}", flush=True)
+                logger.info(f"Download attempt {num_tries + 1}/3 failed for {m.id}: {e}")
                 num_tries += 1
         if not success:
-            print(f"[sync] Could not download {m.name} after 3 tries", flush=True)
-    print("Saved media files to %s", out_dir)
-    print(f"[sync] Done. Files in {out_dir}", flush=True)
+            logger.info(f"Could not download {m.name} after 3 tries")
+    logger.info(f"Saved media files to {out_dir}")
     return out_dir
 
 
@@ -216,7 +225,7 @@ def fetch_and_save_localizations(
     """
     base_dir = _project_tmp_dir(project_id)
     out_path = os.path.join(base_dir, f"localizations_{port}.jsonl")
-    print(f"[sync] Localizations JSONL will be saved to: {out_path}", flush=True)
+    logger.info(f"Localizations JSONL will be saved to: {out_path}")
     batch_size = LOCALIZATION_BATCH_SIZE
 
     def _count_kwargs(use_version: bool) -> dict:
@@ -241,53 +250,52 @@ def fetch_and_save_localizations(
     try:
         count_kwargs = _count_kwargs(use_version=True)
         loc_count = api.get_localization_count(project_id, **count_kwargs)
-        print(f"[sync] get_localization_count(project_id={project_id}, media_ids={bool(media_ids)}, version={version_id}) = {loc_count}", flush=True)
+        logger.info(f"get_localization_count(project_id={project_id}, media_ids={bool(media_ids)}, version={version_id}) = {loc_count}")
         if loc_count == 0 and version_id is not None:
             # Fallback: requested version may have no localizations; try without version filter
             count_kwargs_no_ver = _count_kwargs(use_version=False)
             count_no_ver = api.get_localization_count(project_id, **count_kwargs_no_ver)
             if count_no_ver > 0:
-                print(f"[sync] Version {version_id} has 0 localizations; falling back to all versions (count={count_no_ver})", flush=True)
+                logger.info(f"Version {version_id} has 0 localizations; falling back to all versions (count={count_no_ver})")
                 use_version = False
     except Exception as e:
         loc_count = None
-        print(f"[sync] get_localization_count failed (will still try list): {e}", flush=True)
+        logger.exception(f"get_localization_count failed (will still try list): {e}")
 
     total = 0
     after_id = None
     with open(out_path, "w") as f:
         while True:
             kwargs = _list_kwargs(after_id, use_version)
-            print(f"[sync] get_localization_list(project_id={project_id}, {kwargs})", flush=True)
+            logger.info(f"get_localization_list(project_id={project_id}, {kwargs})")
             try:
                 batch = api.get_localization_list(project_id, **kwargs)
             except Exception as e:
-                print(f"[sync] get_localization_list failed: {e}", flush=True)
-                print("get_localization_list failed", flush=True)
+                logger.info(f"get_localization_list failed: {e}")
+                logger.info("get_localization_list failed")
                 break
             if not batch:
                 if total == 0 and version_id is not None and use_version:
                     # First batch empty with version filter; retry without version
-                    print(f"[sync] First batch empty with version={version_id}; retrying without version filter", flush=True)
+                    logger.info(f"First batch empty with version={version_id}; retrying without version filter")
                     use_version = False
                     after_id = None
                     continue
-                print(f"[sync] Localizations batch empty (after={after_id}), done", flush=True)
+                logger.info(f"Localizations batch empty (after={after_id}), done")
                 break
             for loc in batch:
                 try:
                     obj = loc.to_dict() if hasattr(loc, "to_dict") else loc
                     f.write(json.dumps(obj, default=_json_serial) + "\n")
                 except Exception as e:
-                    print("Skip localization serialization: %s", e)
+                    logger.info(f"Skip localization serialization: {e}")
                     continue
             total += len(batch)
             after_id = batch[-1].id if batch else None
-            print(f"[sync] Localizations batch: count={len(batch)} total_so_far={total} last_id={after_id}", flush=True)
+            logger.info(f"Localizations batch: count={len(batch)} total_so_far={total} last_id={after_id}")
             if len(batch) < batch_size:
                 break
-    print("Fetched %s localizations -> %s", total, out_path)
-    print(f"[sync] Localizations JSONL saved to: {out_path} ({total} rows)", flush=True)
+    logger.info(f"Fetched {total} localizations -> {out_path}")
     return out_path
 
 
@@ -338,7 +346,7 @@ def _crop_one(
         resized.save(out_path)
         return True
     except Exception as e:
-        print("Crop failed for %s: %s", out_path.stem, e)
+        logger.info(f"Crop failed for {out_path.stem}: {e}")
         return False
 
 
@@ -354,7 +362,7 @@ def crop_localizations_parallel(
     Returns (num_cropped, num_failed).
     """
     if not os.path.exists(download_dir) or not os.path.exists(localizations_jsonl_path):
-        print("Download dir or localizations JSONL missing; skipping crops")
+        logger.info("Download dir or localizations JSONL missing; skipping crops")
         return (0, 0)
     download_path = Path(download_dir)
     crops_path = Path(crops_dir)
@@ -398,9 +406,9 @@ def crop_localizations_parallel(
             out_path = crops_path / image_path.stem / f"{elemental_id}.png"
             tasks.append((image_path, loc, out_path))
     if not tasks:
-        print("[sync] No localization crops to process", flush=True)
+        logger.info("No localization crops to process")
         return (0, 0)
-    print(f"[sync] Cropping {len(tasks)} localizations in parallel (size={size}x{size})", flush=True)
+    logger.info(f"Cropping {len(tasks)} localizations in parallel (size={size}x{size})")
     workers = max_workers or min(32, (os.cpu_count() or 4) * 2)
     num_ok = 0
     num_fail = 0
@@ -409,12 +417,12 @@ def crop_localizations_parallel(
         for fut in as_completed(futures):
             if fut.exception():
                 num_fail += 1
-                print("Crop task failed: %s", fut.exception())
+                logger.info(f"Crop task failed: {fut.exception()}")
             elif fut.result():
                 num_ok += 1
             else:
                 num_fail += 1
-    print(f"[sync] Crops done: {num_ok} saved to {crops_path}, {num_fail} failed", flush=True)
+    logger.info(f"Crops done: {num_ok} saved to {crops_path}, {num_fail} failed")
     return (num_ok, num_fail)
 
 
@@ -589,9 +597,9 @@ def reconcile_dataset_with_tator(
                 to_remove.append(s.id)
         if to_remove:
             dataset.delete_samples(to_remove)
-            print(f"[sync] Reconcile: removed {len(to_remove)} samples (deleted in Tator)", flush=True)
+            logger.info(f"Reconcile: removed {len(to_remove)} samples (deleted in Tator)")
     else:
-        print(f"[sync] Reconcile: 0 localizations from Tator; skipping delete step (keeping existing samples)", flush=True)
+        logger.info(f"Reconcile: 0 localizations from Tator; skipping delete step (keeping existing samples)")
 
     # 2. Update samples with changed box (crop already overwritten by crop_localizations_parallel)
     updated = 0
@@ -607,7 +615,7 @@ def reconcile_dataset_with_tator(
             sample.save()
             updated += 1
     if updated:
-        print(f"[sync] Reconcile: updated {updated} samples (box changed)", flush=True)
+        logger.info(f"Reconcile: updated {updated} samples (box changed)")
 
     # 3. Add new samples (elemental_id in Tator but not in dataset)
     dataset_eids = {str(s["elemental_id"]) for s in dataset if "elemental_id" in s}
@@ -638,7 +646,7 @@ def reconcile_dataset_with_tator(
             dataset.add_samples([sample])
             added += 1
     if added:
-        print(f"[sync] Reconcile: added {added} new samples", flush=True)
+        logger.info(f"Reconcile: added {added} new samples")
 
     return dataset
 
@@ -683,9 +691,8 @@ def build_fiftyone_dataset_from_crops(
 
     # Load localizations index by elemental_id
     loc_index = _load_localizations_index(localizations_jsonl_path)
-    print(f"[sync] loc_index={loc_index}", flush=True)
-    print("Loaded %s localizations from JSONL", len(loc_index))
-    print(f"[sync] Loaded {len(loc_index)} localizations from JSONL", flush=True)
+    logger.info(f"loc_index={loc_index}")
+    logger.info(f"Loaded {len(loc_index)} localizations from JSONL")
 
     # Collect crop filepaths
     samples: list = []
@@ -717,12 +724,12 @@ def build_fiftyone_dataset_from_crops(
             api_url = config.get("source_url")
             project_id = config.get("project_id")
             version_id = config.get("version_id")
-            print(f"[sync] loc={loc} api_url={api_url} project_id={project_id} version_id={version_id}", flush=True)
+            logger.info(f"loc={loc} api_url={api_url} project_id={project_id} version_id={version_id}")
             if loc and api_url and project_id is not None:
                 tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
                 if tator_url:
                     sample["annotation"] = tator_url
-                    print(f"[sync] tator_url={tator_url}", flush=True)
+                    logger.info(f"tator_url={tator_url}")
             sample.tags.append(label)
             if loc:
                 attrs = loc.get("attributes") or {}
@@ -738,11 +745,11 @@ def build_fiftyone_dataset_from_crops(
     if not samples:
         raise ValueError(f"No crops found in {crops_dir} (checked {seen} files)")
 
-    print(f"[sync] Collected {len(samples)} samples for dataset", flush=True)
+    logger.info(f"Collected {len(samples)} samples for dataset")
 
     # Handle existing dataset: always reconcile, never delete
     if dataset_name in fo.list_datasets(): 
-        print(f"[sync] Reconcile: loading dataset {dataset_name}", flush=True)
+        logger.info(f"Reconcile: loading dataset {dataset_name}")
         dataset = fo.load_dataset(dataset_name)
         dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
         dataset = reconcile_dataset_with_tator(
@@ -754,14 +761,14 @@ def build_fiftyone_dataset_from_crops(
             image_extensions=image_extensions,
             max_samples=max_samples,
         )
-        print(f"[sync] Reconcile: dataset {dataset_name} loaded", flush=True)
+        logger.info(f"Reconcile: dataset {dataset_name} loaded")
         return dataset
 
-    print(f"[sync] Reconcile: creating new dataset {dataset_name} in database {fo.config.database_name}", flush=True)
+    logger.info(f"Reconcile: creating new dataset {dataset_name} in database {fo.config.database_name}")
     dataset = fo.Dataset(dataset_name)
     dataset.persistent = True  # Persist dataset in MongoDB after session ends
     dataset.add_samples(samples)
-    print(f"[sync] Created dataset '{dataset_name}' with {len(samples)} samples", flush=True)
+    logger.info(f"Created dataset '{dataset_name}' with {len(samples)} samples")
     return dataset
 
 
@@ -796,6 +803,37 @@ def _default_dataset_name(api: Any, project_id: int, version_id: int | None) -> 
     return f"{project_name}_{version_name}"
 
 
+def _dataset_name_with_port(dataset_name: str, port: int) -> str:
+    """Append port to dataset name if not already present (e.g. 901902-uavs_Baseline -> 901902-uavs_Baseline_5151)."""
+    name = (dataset_name or "").strip()
+    if not name:
+        return name
+    suffix = f"_{port}"
+    return name if name.endswith(suffix) else f"{name}{suffix}"
+
+
+def _update_localization_attributes(
+    api: Any,
+    project_id: int,
+    version_id: int,
+    elemental_id: str,
+    attrs: dict[str, Any],
+) -> None:
+    """
+    Update a localization's attributes by elemental_id.
+    Uses get_localization_list to resolve elemental_id to id, then
+    api.update_localization(id, localization_update) per Tator API.
+    """
+    locs = api.get_localization_list(
+        project_id, version=[version_id], elemental_id=elemental_id
+    )
+    locs_list = list(locs) if not isinstance(locs, list) else locs
+    if not locs_list:
+        raise ValueError(f"No localization found for elemental_id={elemental_id}")
+    loc_id = locs_list[0].id
+    api.update_localization(loc_id, localization_update={"attributes": attrs})
+
+
 def sync_edits_to_tator(
     project_id: int,
     version_id: int,
@@ -806,14 +844,15 @@ def sync_edits_to_tator(
     label_attr: str | None = DEFAULT_LABEL_ATTR,
     score_attr: str | None = DEFAULT_SCORE_ATTR,
     debug: bool = False,
+    project_name: str | None = None,
 ) -> dict[str, Any]:
     """
     Push FiftyOne dataset edits (labels, confidence) back to Tator localizations.
-    Uses elemental_id to match samples to Tator localizations; updates attributes
-    via update_localization_by_elemental_id.
+    Matches samples by elemental_id; looks up localization id via get_localization_list,
+    then updates attributes via update_localization(id, localization_update).
     Returns {"status": "ok", "updated": int, "failed": int, "errors": list} or raises.
     """
-    db_entry = get_database_entry(project_id, port)
+    db_entry = get_database_entry(project_id, port, project_name=project_name)
     if db_entry is None:
         raise ValueError(f"No database entry found for project_id={project_id} and port={port}")
     db_name = database_name_from_uri(db_entry.uri)
@@ -870,23 +909,23 @@ def sync_edits_to_tator(
         if current_hash == last_sync_hash:
             skipped += 1
             if _debug:
-                print(f"[sync] SKIP elem={elemental_id} hash={current_hash[:8]}", flush=True)
+                logger.info(f"SKIP elem={elemental_id} hash={current_hash[:8]}")
             continue
         try:
-            api.update_localization_by_elemental_id(
-                version_id, str(elemental_id), localization_update={"attributes": attrs}
+            _update_localization_attributes(
+                api, project_id, version_id, str(elemental_id), attrs
             )
             sample["last_sync_hash"] = current_hash
             sample.save()
             updated += 1
             if _debug:
-                print(f"[sync] UPDATE elem={elemental_id}", flush=True)
+                logger.info(f"UPDATE elem={elemental_id}")
         except Exception as e:
             failed += 1
             errors.append(f"{elemental_id}: {e}")
-            print("Failed to update localization %s: %s", elemental_id, e)
+            logger.info(f"Failed to update localization {elemental_id}: {e}")
 
-    print(f"[sync] sync_edits_to_tator: updated={updated} skipped={skipped} failed={failed}", flush=True)
+    logger.info(f"sync_edits_to_tator: updated={updated} skipped={skipped} failed={failed}")
     return {"status": "ok", "updated": updated, "skipped": skipped, "failed": failed, "errors": errors[:20]}
 
 
@@ -913,6 +952,7 @@ def run_sync_job(
         api_url=api_url,
         token=token,
         port=port,
+        project_name=project_name,
         database_uri=database_uri,
         database_name=database_name,
         config_path=config_path,
@@ -926,6 +966,7 @@ def sync_project_to_fiftyone(
     api_url: str,
     token: str,
     port: int,
+    project_name: str | None = None,
     database_uri: str | None = None,
     database_name: str | None = None,
     config_path: str | None = None,
@@ -936,15 +977,15 @@ def sync_project_to_fiftyone(
     Uses per-project MongoDB database (database_uri when provided, else resolved via config; database_name override or get_database_name).
     Returns {"status": "ok", "dataset_name": str, "database_name": str} or raises.
     """
-    print(f"[sync] sync_project_to_fiftyone CALLED: project_id={project_id} version_id={version_id} api_url={api_url} port={port}", flush=True)
+    logger.info(f"sync_project_to_fiftyone CALLED: project_id={project_id} version_id={version_id} api_url={api_url} port={port}")
     sess = get_session(project_id, port)
     resolved_db = (
         (database_name.strip() if database_name and database_name.strip() else None)
         or (sess.get("database_name") if sess else None)
     )
-    fo.config.database_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port)
+    fo.config.database_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
     fo.config.database_name = resolved_db
-    print(f"[sync] database_uri={fo.config.database_uri} database_name={resolved_db}", flush=True)
+    logger.info(f"database_uri={fo.config.database_uri} database_name={resolved_db}")
 
     lock_key = get_sync_lock_key(resolved_db, project_id, version_id)
     if not try_acquire_sync_lock(lock_key):
@@ -962,35 +1003,32 @@ def sync_project_to_fiftyone(
         try:
             host = api_url.rstrip("/")
             api = tator.get_api(host, token)
-            print(f"[sync] Fetching media IDs... {host} {token} {project_id} {api_url}", flush=True)
+            logger.info(f"Fetching media IDs... {host} {token} {project_id} {api_url}")
             media_ids_list = fetch_project_media_ids(api_url, token, project_id)
             if not media_ids_list:
-                print(f"[sync] No media IDs for project {project_id}", flush=True)
-                print("No media IDs found for project %s; skipping download", project_id)
+                logger.info(f"No media IDs for project {project_id}; skipping download")
             else:
-                print("media_ids:", media_ids_list, flush=True)
-                print(f"[sync] Getting media objects in chunks...", flush=True)
+                logger.info("media_ids:", media_ids_list)
+                logger.info(f"Getting media objects in chunks...")
                 all_media = get_media_chunked(api, project_id, media_ids_list)
                 if not all_media:
-                    print(f"[sync] No Media objects for {len(media_ids_list)} ids", flush=True)
-                    print("No Media objects returned for %s ids; skipping download", len(media_ids_list))
+                    logger.info(f"No Media objects returned for {len(media_ids_list)} ids; skipping download")
                 else:
-                    print(f"[sync] Saving {len(all_media)} media to tmp...", flush=True)
+                    logger.info(f"Saving {len(all_media)} media to tmp...")
                     tmp_dir = save_media_to_tmp(api, project_id, all_media)
                     if tmp_dir:
-                        print("saved_media_dir:", tmp_dir, flush=True)
-            print(f"[sync] Fetching localizations...", flush=True)
+                        logger.info("saved_media_dir:", tmp_dir)
+            logger.info(f"Fetching localizations...")
             localizations_path = fetch_and_save_localizations(
                 api, port, project_id, version_id=version_id, media_ids=media_ids_list or None
             )
             if localizations_path:
-                print(f"[sync] saved_localizations_path (JSONL): {localizations_path}", flush=True)
+                logger.info(f"saved_localizations_path (JSONL): {localizations_path}")
             if tmp_dir and localizations_path:
                 crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
                 crop_localizations_parallel(tmp_dir, localizations_path, crops_dir, size=224)
         except Exception as e:
-            print("fetch/save media or localizations failed: %s", e)
-            print(f"[sync] Error: {e}", flush=True)
+            logger.info(f"fetch/save media or localizations failed: {e}")
             return {
                 "status": "error",
                 "message": str(e),
@@ -1001,7 +1039,7 @@ def sync_project_to_fiftyone(
             }
 
         if not crops_dir or not localizations_path:
-            print(f"[sync] No crops or localizations; skipping dataset build", flush=True)
+            logger.info(f"No crops or localizations; skipping dataset build")
             return {
                 "status": "ok",
                 "message": "No crops to load; media/localizations missing or empty",
@@ -1017,10 +1055,9 @@ def sync_project_to_fiftyone(
         if config_path and os.path.exists(config_path):
             try:
                 config = _load_config(config_path)
-                print(f"[sync] Loaded config from {config_path}", flush=True)
+                logger.info(f"Loaded config from {config_path}")
             except Exception as e:
-                print("Failed to load config %s: %s", config_path, e)
-                print(f"[sync] Config load failed: {e}", flush=True)
+                logger.info(f"Failed to load config {config_path}: {e}")
 
         # Inject Tator base URL and ids so sample "url" can link to the localization's media page
         config["source_url"] = api_url.rstrip("/")
@@ -1028,13 +1065,14 @@ def sync_project_to_fiftyone(
         config["version_id"] = version_id
 
         dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
+        dataset_name = _dataset_name_with_port(dataset_name, port)
 
         # Set env so FiftyOne app subprocess uses the same database
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
         os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
         try:
-            print(f"[sync] Building dataset {dataset_name}", flush=True)
+            logger.info(f"Building dataset {dataset_name}")
             dataset = build_fiftyone_dataset_from_crops(
                 crops_dir=crops_dir,
                 localizations_jsonl_path=localizations_path,
@@ -1043,8 +1081,7 @@ def sync_project_to_fiftyone(
                 download_dir=tmp_dir or None,
             )
         except Exception as e:
-            print("Dataset build failed: %s", e)
-            print(f"[sync] Dataset build failed: {e}", flush=True)
+            logger.info(f"Dataset build failed: {e}")
             return {
                 "status": "error",
                 "message": str(e),
@@ -1055,14 +1092,14 @@ def sync_project_to_fiftyone(
                 "saved_crops_dir": crops_dir or None,
             }
 
-        print(f"[sync] sync_project_to_fiftyone done: dataset={dataset_name}", flush=True)
-        print(
+        logger.info(f"sync_project_to_fiftyone done: dataset={dataset_name}")
+        logger.info(
             "sync_project_to_fiftyone: project=%s port=%s database=%s dataset=%s",
             project_id, port, resolved_db, dataset_name,
         )
 
         sample_count = len(dataset)
-        print(f"[sync] Dataset '{dataset_name}' has {sample_count} samples", flush=True)
+        logger.info(f"Dataset '{dataset_name}' has {sample_count} samples")
 
         # Always compute embeddings (from service) and UMAP; config.embeddings overrides defaults
         embeddings_config = config.get("embeddings") or {}
@@ -1100,24 +1137,24 @@ def sync_project_to_fiftyone(
                     project_name=vss_project,
                     service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
                 )
-                print(f"[sync] Embeddings and UMAP completed for dataset '{dataset_name}'", flush=True)
+                logger.info(f"Embeddings and UMAP completed for dataset '{dataset_name}'")
             except ImportError as e:
-                print(f"[sync] Skipping embeddings/UMAP (missing deps): {e}", flush=True)
+                logger.info(f"Skipping embeddings/UMAP (missing deps): {e}")
             except Exception as e:
-                print(f"[sync] Embeddings/UMAP failed (dataset still available): {e}", flush=True)
+                logger.info(f"Embeddings/UMAP failed (dataset still available): {e}")
                 logging.getLogger(__name__).exception("Embeddings/UMAP failed")
         else:
-            print("[sync] No vss_project; skipping embeddings/UMAP", flush=True)
+            logger.info("No vss_project; skipping embeddings/UMAP")
 
         if launch_app:
             # Reload dataset from MongoDB so the server (which loads from DB) sees the same state
             try:
                 dataset.reload()
                 sample_count = len(dataset)
-                print(f"[sync] Reloaded dataset from DB: {sample_count} samples", flush=True)
+                logger.info(f"Reloaded dataset from DB: {sample_count} samples")
             except Exception as e:
-                logging.getLogger(__name__).debug("Dataset reload before launch: %s", e)
-            print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
+                logging.getLogger(__name__).debug(f"Dataset reload before launch: {e}")
+            logger.info(f"Launching FiftyOne app on port {port}...")
             # _stop_process_on_port(port)
             session = _launch_app_embedded(dataset, port)
             # Give the FiftyOne server time to start and accept state before the browser connects
@@ -1146,10 +1183,10 @@ def main() -> None:
     token = os.getenv("TOKEN")
     project_id_str = os.getenv("PROJECT_ID")
     media_ids_str = os.getenv("MEDIA_IDS", "").strip()
-    print(f"[sync] main: HOST={'<set>' if host else '<unset>'} PROJECT_ID={project_id_str or '<unset>'} MEDIA_IDS={'<set>' if media_ids_str else '<unset>'}", flush=True)
+    logger.info(f"main: HOST={'<set>' if host else '<unset>'} PROJECT_ID={project_id_str or '<unset>'} MEDIA_IDS={'<set>' if media_ids_str else '<unset>'}")
 
     if not host or not token or not project_id_str:
-        print("Set HOST, TOKEN, and PROJECT_ID environment variables.")
+        logger.info("Set HOST, TOKEN, and PROJECT_ID environment variables.")
         return
     project_id = int(project_id_str)
     media_ids_filter: list[int] | None = None
@@ -1157,22 +1194,22 @@ def main() -> None:
         media_ids_filter = [int(id_.strip()) for id_ in media_ids_str.split(",") if id_.strip()]
 
     media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
-    print("media_ids:", media_ids)
+    logger.info("media_ids:", media_ids)
     api = tator.get_api(host, token)
     if media_ids:
         all_media = get_media_chunked(api, project_id, media_ids)
         if all_media:
             saved_dir = save_media_to_tmp(api, project_id, all_media)
-            print("saved_media_dir:", saved_dir)
+            logger.info("saved_media_dir:", saved_dir)
         else:
-            print("No Media objects returned; download skipped.")
+            logger.info("No Media objects returned; download skipped.")
     version_id_str = os.getenv("VERSION_ID", "").strip()
     version_id = int(version_id_str) if version_id_str else None
     localizations_path = fetch_and_save_localizations(
         api, project_id, version_id=version_id, media_ids=media_ids if media_ids else None
     )
     if localizations_path:
-        print("saved_localizations_path (JSONL):", localizations_path)
+        logger.info("saved_localizations_path (JSONL):", localizations_path)
     base_dir = _project_tmp_dir(project_id)
     download_dir = os.path.join(base_dir, "download")
     crops_dir = os.path.join(base_dir, "crops")
@@ -1180,14 +1217,20 @@ def main() -> None:
         crop_localizations_parallel(download_dir, localizations_path, crops_dir, size=224)
 
     if crops_dir and localizations_path and os.path.isdir(crops_dir):
-        port = get_port_for_project(project_id)
-        fo.config.database_uri = get_database_uri(project_id, port)
-        fo.config.database_name = get_database_name(project_id, port, None)
+        project_name_cli = None
+        try:
+            project_name_cli = getattr(api.get_project(project_id), "name", None) or str(project_id)
+        except Exception:
+            project_name_cli = str(project_id)
+        port = get_port_for_project(project_id, project_name=project_name_cli)
+        fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name_cli)
+        fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
         os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
         config_path = os.getenv("CONFIG_PATH")
         config = _load_config(config_path) if config_path and os.path.exists(config_path) else {}
         dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
+        dataset_name = _dataset_name_with_port(dataset_name, port)
         dataset = build_fiftyone_dataset_from_crops(
             crops_dir=crops_dir,
             localizations_jsonl_path=localizations_path,
@@ -1195,10 +1238,10 @@ def main() -> None:
             config=config,
             download_dir=download_dir,
         )
-        print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
+        logger.info(f"Launching FiftyOne app on port {port}...")
         _stop_process_on_port(port)
         session = _launch_app_embedded(dataset, port)
-        print(f"[sync] Session: {session}", flush=True)
+        logger.info(f"Session: {session}")
 
 
 if __name__ == "__main__":

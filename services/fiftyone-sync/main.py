@@ -503,6 +503,7 @@ LAUNCHER_TEMPLATE = """
             version_id: v,
             api_url: apiUrl,
             token: token,
+            port: String(port),
             database_name: databaseName
           });
           var fullUrl = syncServiceUrl + '/sync-to-tator?' + params.toString();
@@ -578,17 +579,12 @@ async def get_database_info(
         proj = api.get_project(project_id)
         project_name = getattr(proj, "name", None) or str(project_id)
     except Exception as e:
-        logger.warning("[database-info] get_project(%s) failed: %s", project_id, e)
+        logger.warning(f"get_project({project_id}) failed: {e}")
     if not project_name or not project_name.strip():
         project_name = str(project_id)
     project_name = project_name.strip()
-    logger.info(
-        "[database-info] request project_id=%s -> project_name=%r port=%s",
-        project_id,
-        project_name,
-        port,
-    )
-    database_entry = get_database_entry(project_name, port)
+    logger.info(f"request project_id={project_id} -> project_name={project_name!r} port={port}")
+    database_entry = get_database_entry(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
     return { "port": database_entry.port, "database_name": database_name_from_uri(database_entry.uri), "database_uri": database_entry.uri }
@@ -668,18 +664,13 @@ async def sync(
         proj = api.get_project(project_id)
         project_name = getattr(proj, "name", None) or str(project_id)
     except Exception as e:
-        logger.warning("[sync] get_project(%s) failed: %s", project_id, e)
+        logger.warning(f"get_project({project_id}) failed: {e}")
     if not project_name or not project_name.strip():
         project_name = str(project_id)
     project_name = project_name.strip() 
-    logger.info(
-        "[sync] project_id=%s project_name=%r -> port=%s",
-        project_id,
-        project_name,
-        port,
-    )
+    logger.info(f"project_id={project_id} project_name={project_name!r} -> port={port}")
     api_url_clean = api_url.rstrip("/")
-    database_entry = get_database_entry(project_name, port)
+    database_entry = get_database_entry(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
 
@@ -698,27 +689,30 @@ async def sync(
         return {"job_id": job_id, "status": "queued", "port": port}
     # No Redis: run inline (blocking; may be slow for large projects)
     from sync import sync_project_to_fiftyone
-    result = sync_project_to_fiftyone(
-        project_id=project_id,
-        version_id=version_id,
-        api_url=api_url_clean,
-        token=token,
-        port=port,
-        database_uri=database_entry.uri,
-        database_name=database_name_from_uri(database_entry.uri),
-        config_path=config_path,
-        launch_app=launch_app,
-    )
-    if result.get("status") == "busy":
-        raise HTTPException(
-            status_code=409,
-            detail=result.get(
-                "message",
-                "This dataset is being updated by another sync. Please try again in a few minutes.",
-            ),
-        )
-    result["port"] = port
-    return result
+    try:
+      result = sync_project_to_fiftyone(
+          project_id=project_id,
+          version_id=version_id,
+          api_url=api_url_clean,
+          token=token,
+          port=port,
+          database_uri=database_entry.uri,
+          database_name=database_name_from_uri(database_entry.uri),
+          config_path=config_path,
+          launch_app=launch_app,
+      )
+      if result.get("status") == "busy":
+          raise HTTPException(
+              status_code=409,
+              detail=result.get(
+                  "message",
+                  "This dataset is being updated by another sync. Please try again in a few minutes.",
+              ),
+          )
+      result["port"] = port
+      return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app_launch.get("/sync/status/{job_id}")
@@ -751,18 +745,32 @@ async def sync_to_tator(
     Requires the dataset to exist (run POST /sync first). Uses elemental_id to match samples.
     """
     from sync import sync_edits_to_tator
-    result = sync_edits_to_tator(
-        project_id=project_id,
-        version_id=version_id,
-        port=port,
-        api_url=api_url.rstrip("/"),
-        token=token,
-        dataset_name=dataset_name,
-        label_attr=label_attr,
-        score_attr=score_attr,
-        debug=debug,
-    )
-    return result
+    project_name = None
+    try:
+        import tator
+        api = tator.get_api(api_url.rstrip("/"), token)
+        proj = api.get_project(project_id)
+        project_name = getattr(proj, "name", None) or str(project_id)
+    except Exception as e:
+        logger.warning(f"sync_to_tator get_project({project_id}) failed: {e}")
+    if not project_name or not str(project_name).strip():
+        project_name = str(project_id)
+    try:
+      result = sync_edits_to_tator(
+          project_id=project_id,
+          version_id=version_id,
+          port=port,
+          api_url=api_url.rstrip("/"),
+          token=token,
+          dataset_name=dataset_name,
+          label_attr=label_attr,
+          score_attr=score_attr,
+          debug=debug,
+          project_name=project_name.strip(),
+      )
+      return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.get("/health")
