@@ -4,8 +4,12 @@ FiftyOne sync service: embedding API, port manager, and launcher for Tator dashb
 
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
 from fastapi import FastAPI
@@ -21,7 +25,20 @@ from embedding_service import (
     init_disk_cache,
     queue_embedding_job,
 )
-from port_manager import ensure_session, get_database_name, get_port_for_project, get_session
+from database_manager import get_database_entry
+from database_uri_config import DatabaseUriConfig, database_name_from_uri
+
+# Origins allowed for CORS (dashboard and applet iframes). When allow_credentials=True,
+# browsers require a specific origin; "*" is not valid.
+CORS_ORIGINS = [
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+_cors_origins_env = os.environ.get("FIFTYONE_SYNC_CORS_ORIGINS", "").strip()
+if _cors_origins_env:
+    CORS_ORIGINS.extend(origin.strip() for origin in _cors_origins_env.split(",") if origin.strip())
 
 app = FastAPI(
     title="FiftyOne Sync Service",
@@ -30,18 +47,15 @@ app = FastAPI(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 router = APIRouter(tags=["embedding"])
 app_launch = APIRouter(tags=["launcher"])
-
-
-# --- Embedding API ---
-
 
 class EmbedResponse(BaseModel):
     uuid: str
@@ -111,7 +125,8 @@ async def get_embedding_projects() -> dict:
 # Optional: iframe_host, base_port (5151).
 # For "Sync from Tator" / "Sync to Tator": set sync_service_url, api_url (no token tparam).
 # User enters their Tator API token in the applet and clicks "Test token"; sync controls enable after token is verified.
-# Optional tparams: version_id, database_name, project_name (Tator project name for embedding check).
+# Optional tparams: version_id, database_name, project_name (vss_project for embedding status only).
+# database-info is called with project_id; send api_url and Authorization to resolve to config key (project name).
 # Embedding service status: server uses FASTVSS_API_URL; GET /embedding-projects shows availability.
 # FiftyOne opens in a new window/tab (Open FiftyOne button); no iframe.
 LAUNCHER_TEMPLATE = """
@@ -162,12 +177,6 @@ LAUNCHER_TEMPLATE = """
             {% endif %}
           </td>
         </tr>
-        <tr>
-          <th>Launch</th>
-          <td>
-            <button type="button" id="open-fiftyone-btn">Open FiftyOne</button>
-          </td>
-        </tr>
         {% if sync_service_url and api_url %}
         <tr>
           <th>Token</th>
@@ -214,19 +223,21 @@ LAUNCHER_TEMPLATE = """
     (function() {
       var project = parseInt("{{ project }}", 10) || 0;
       var iframeHost = "{{ (iframe_host | default('localhost')) }}";
-      var basePort = {{ (base_port | default(5151)) | int }};
-      var port = basePort + (project - 1);
+      var port = {{ (port | default(5151)) | int }};
       var appUrl = 'http://' + iframeHost + ':' + port + '/';
+      var syncServiceUrl = "{{ (sync_service_url | default('') | e) }}".replace(/\/$/, '');
+      var projectName = "{{ (project_name | default('') | e) }}".trim();
+      var databaseName = "{{ database_name | default('') | e }}" || ('fiftyone_project_' + project);
+      var databaseUri = '';
+      // Do not call /database-info on load: it requires valid Authorization. Resolve port/database only after token is provided and tested.
+      if (project && syncServiceUrl) {
+        console.log('[FiftyOne applet] database-info deferred until token is tested; initial port=', port);
+      }
       var configYamlEl = document.getElementById('config-yaml-data');
       var configYaml = configYamlEl ? (configYamlEl.getAttribute('data-config') || '') : '';
       if (configYaml) window.FIFTYONE_CONFIG_YAML = configYaml;
-      var openBtn = document.getElementById('open-fiftyone-btn');
-      if (openBtn) openBtn.addEventListener('click', function() { window.open(appUrl, '_blank'); });
-      var syncServiceUrl = "{{ (sync_service_url | default('') | e) }}".replace(/\/$/, '');
       var apiUrl = "{{ api_url | default('') | e }}";
-      var projectName = "{{ (project_name | default('') | e) }}".trim();
       var initialVersionId = "{{ version_id | default('') | e }}";
-      var databaseName = "{{ database_name | default('') | e }}" || ('fiftyone_project_' + project);
       var syncBtn = document.getElementById('sync-from-tator-btn');
       var syncStatus = document.getElementById('sync-status');
       var versionSelect = document.getElementById('version-select');
@@ -316,8 +327,27 @@ LAUNCHER_TEMPLATE = """
             .then(function(versions) {
               setSyncControlsEnabled(true);
               loadVersions(token);
-              syncStatus.textContent = 'Token OK. Sync enabled.';
-              setTimeout(function() { syncStatus.textContent = ''; }, 3000);
+              syncStatus.textContent = 'Token OK. Resolving port/database…';
+              var databaseInfoUrl = syncServiceUrl + '/database-info?project_id=' + project + '&api_url=' + encodeURIComponent(apiUrl) + '&port=' + port;
+              fetch(databaseInfoUrl, { headers: { 'Authorization': 'Token ' + token } })
+                .then(function(r) {
+                  if (!r.ok) return null;
+                  return r.json();
+                })
+                .then(function(d) {
+                  if (d && d.port != null) {
+                    port = d.port;
+                    appUrl = 'http://' + iframeHost + ':' + port + '/';
+                    console.log('[FiftyOne applet] database-info resolved: port=', port, 'database_name=', d.database_name, 'appUrl=', appUrl);
+                  }
+                  if (d && d.database_name) databaseName = d.database_name;
+                  if (d && d.database_uri) databaseUri = d.database_uri;
+                })
+                .catch(function() {})
+                .finally(function() {
+                  syncStatus.textContent = 'Token OK. Sync enabled.';
+                  setTimeout(function() { syncStatus.textContent = ''; }, 3000);
+                });
             })
             .catch(function(err) {
               setSyncControlsEnabled(false);
@@ -355,7 +385,7 @@ LAUNCHER_TEMPLATE = """
               if (!inList) el.classList.add('error');
               else el.classList.remove('error');
             } else {
-              el.textContent = 'Available (' + (projects.length || 0) + ' project(s)); set project_name tparam to check this project';
+              el.textContent = 'Available (' + (projects.length || 0) + ' project(s)); set project_name tparam (vss_project) to check this project';
               el.classList.remove('error');
             }
           })
@@ -372,7 +402,7 @@ LAUNCHER_TEMPLATE = """
           syncBtn.disabled = true;
           syncStatus.textContent = 'Syncing…';
           syncStatus.classList.remove('error');
-          var params = new URLSearchParams({ project_id: String(project), api_url: apiUrl, token: token, launch_app: 'true', database_name: databaseName });
+          var params = new URLSearchParams({ project_id: String(project), api_url: apiUrl, token: token, launch_app: 'true', port: port });
           if (v) params.set('version_id', v);
           var fullSyncUrl = syncServiceUrl + '/sync?' + params.toString();
           fetch(fullSyncUrl, { method: 'POST' })
@@ -526,14 +556,52 @@ async def message_template() -> HTMLResponse:
     return HTMLResponse(content=MESSAGE_TEMPLATE, status_code=200)
 
 
+@app_launch.get("/database-info")
+async def get_database_info(
+    project_id: int = Query(..., description="Tator project ID; resolved to config key (project name) via API"),
+    api_url: str = Query(..., description="Tator API base URL (required, same as /versions)"),
+    port: int = Query(..., description="Port for this project"),
+    authorization: str | None = Header(None, alias="Authorization"),
+) -> dict:
+    """
+    Resolve database (and port) from DatabaseUriConfig. Requires authentication the same as GET /versions:
+    api_url query param and Authorization header (e.g. "Token <token>"). Returns 401 if missing.
+    Project name is resolved via get_project(project_id).name. Returns { port, database_name, database_uri }.
+    """
+    token = _token_from_authorization(authorization)
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    project_name: str | None = None
+    try:
+        import tator
+        api = tator.get_api(api_url.rstrip("/"), token)
+        proj = api.get_project(project_id)
+        project_name = getattr(proj, "name", None) or str(project_id)
+    except Exception as e:
+        logger.warning("[database-info] get_project(%s) failed: %s", project_id, e)
+    if not project_name or not project_name.strip():
+        project_name = str(project_id)
+    project_name = project_name.strip()
+    logger.info(
+        "[database-info] request project_id=%s -> project_name=%r port=%s",
+        project_id,
+        project_name,
+        port,
+    )
+    database_entry = get_database_entry(project_name, port)
+    if database_entry is None:
+        raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
+    return { "port": database_entry.port, "database_name": database_name_from_uri(database_entry.uri), "database_uri": database_entry.uri }
+
+
 @app_launch.get("/render", response_class=HTMLResponse)
 async def render_launcher() -> HTMLResponse:
     """
     Return Jinja2 template for HostedTemplate. Tator fetches this URL and renders with tparams.
-    Required tparams: project (Tator project ID). Optional: iframe_host (host for app URL), base_port (5151), project_name (for embedding status).
+    Required tparams: project (Tator project ID). Optional: iframe_host (host for app URL), base_port (5151), project_name (vss_project for embedding status only).
+    The applet uses GET /database-info?project_id=... to resolve port and database from DatabaseUriConfig.
     "Open FiftyOne" opens the app in a new window. For sync: set sync_service_url and api_url; the user enters their Tator API token in the applet and clicks "Test token" to enable Sync from Tator / Sync to Tator.
     Embedding service status: server uses FASTVSS_API_URL; applet calls GET /embedding-projects to show availability and project registration.
-    Port = base_port + (project - 1).
     """
     return HTMLResponse(LAUNCHER_TEMPLATE)
 
@@ -573,30 +641,7 @@ async def get_versions(
     except Exception as e:
         raise HTTPException(status_code=401, detail=str(e)) from e
     return [{"id": v.id, "name": v.name, "number": v.number} for v in version_list]
-
-
-@app_launch.get("/launch")
-async def launch(
-    project_id: int = Query(..., description="Tator project ID"),
-    version_id: int | None = Query(None),
-    api_url: str | None = Query(None, description="Tator REST API base URL"),
-    token: str | None = Query(None, description="Tator API token"),
-    database_name: str | None = Query(None, description="Override MongoDB database name for this project"),
-) -> dict:
-    """
-    Allocate port and return FiftyOne App URL for the project.
-    Sync (fetch Tator data, build dataset) is triggered separately via POST /sync.
-    """
-    port = ensure_session(project_id, database_name=database_name)
-    sess = get_session(project_id)
-    host = os.environ.get("FIFTYONE_HOST", "localhost")
-    return {
-        "project_id": project_id,
-        "port": port,
-        "url": f"http://{host}:{port}/",
-        "database_name": (sess.get("database_name") or get_database_name(project_id)) if sess else get_database_name(project_id),
-    }
-
+ 
 
 @app_launch.post("/sync")
 async def sync(
@@ -604,7 +649,7 @@ async def sync(
     version_id: int | None = Query(None),
     api_url: str = Query(..., description="Tator REST API base URL (e.g. https://tator.example.com)"),
     token: str = Query(..., description="Tator API token"),
-    database_name: str | None = Query(None, description="Override MongoDB database name for this project"),
+    port: int = Query(..., description="Port for this project"),
     config_path: str | None = Query(None, description="Path to YAML/JSON config file for dataset build"),
     launch_app: bool = Query(True, description="Launch FiftyOne app after sync"),
 ) -> dict:
@@ -614,11 +659,29 @@ async def sync(
     job_id immediately; poll GET /sync/status/{job_id} for progress. Otherwise runs
     sync inline (can block for a long time on large projects).
     """
-    from port_manager import get_port_for_project
     from sync_queue import is_queue_available, enqueue_sync
 
-    port = get_port_for_project(project_id)
+    project_name: str | None = None
+    try:
+        import tator
+        api = tator.get_api(api_url.rstrip("/"), token)
+        proj = api.get_project(project_id)
+        project_name = getattr(proj, "name", None) or str(project_id)
+    except Exception as e:
+        logger.warning("[sync] get_project(%s) failed: %s", project_id, e)
+    if not project_name or not project_name.strip():
+        project_name = str(project_id)
+    project_name = project_name.strip() 
+    logger.info(
+        "[sync] project_id=%s project_name=%r -> port=%s",
+        project_id,
+        project_name,
+        port,
+    )
     api_url_clean = api_url.rstrip("/")
+    database_entry = get_database_entry(project_name, port)
+    if database_entry is None:
+        raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
 
     if is_queue_available():
         job_id = enqueue_sync(
@@ -626,8 +689,9 @@ async def sync(
             version_id=version_id,
             api_url=api_url_clean,
             token=token,
-            port=port,
-            database_name=database_name,
+            port=database_entry.port,
+            project_name=project_name,
+            database_name=database_name_from_uri(database_entry.uri),
             config_path=config_path,
             launch_app=launch_app,
         )
@@ -640,7 +704,8 @@ async def sync(
         api_url=api_url_clean,
         token=token,
         port=port,
-        database_name=database_name,
+        database_uri=database_entry.uri,
+        database_name=database_name_from_uri(database_entry.uri),
         config_path=config_path,
         launch_app=launch_app,
     )
@@ -675,7 +740,7 @@ async def sync_to_tator(
     version_id: int = Query(..., description="Tator version ID (required for update)"),
     api_url: str = Query(..., description="Tator REST API base URL"),
     token: str = Query(..., description="Tator API token"),
-    database_name: str | None = Query(None),
+    port: int = Query(..., description="Port for this project"),
     dataset_name: str | None = Query(None, description="FiftyOne dataset name (default: get_project(project_id).name + '_' + version name)"),
     label_attr: str = Query("Label", description="Tator attribute name for label"),
     score_attr: str | None = Query(None, description="Tator attribute name for score/confidence; omit or empty to skip"),
@@ -689,10 +754,10 @@ async def sync_to_tator(
     result = sync_edits_to_tator(
         project_id=project_id,
         version_id=version_id,
+        port=port,
         api_url=api_url.rstrip("/"),
         token=token,
         dataset_name=dataset_name,
-        database_name=database_name,
         label_attr=label_attr,
         score_attr=score_attr,
         debug=debug,

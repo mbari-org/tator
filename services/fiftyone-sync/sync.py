@@ -24,7 +24,8 @@ import fiftyone as fo
 import tator
 import yaml
 from PIL import Image
-from port_manager import get_database_name, get_database_uri, get_port_for_project, get_session
+from database_uri_config import database_name_from_uri
+from database_manager import get_database_entry, get_session, get_vss_project
 from sync_lock import get_sync_lock_key, release_sync_lock, try_acquire_sync_lock
 
 CHUNK_SIZE = 200
@@ -62,7 +63,7 @@ def _stop_process_on_port(port: int) -> None:
 
 def _launch_app_embedded(dataset: fo.Dataset, port: int):
     """
-    Launch FiftyOne app for embedded/iframe use (no browser tab, no SSH instructions).
+    Launch FiftyOne app browser tab
     Uses remote=True so FiftyOne does not open a browser; we suppress FiftyOne's
     SSH port-forwarding message and print a short note for the Tator dashboard instead.
     See https://docs.voxel51.com/installation/environments.html#remote-data
@@ -76,7 +77,7 @@ def _launch_app_embedded(dataset: fo.Dataset, port: int):
         fo_session_logger.setLevel(old_level)
     print(
         f"[sync] FiftyOne app is running on port {port}. "
-        "Open it in the Tator dashboard iframe (or at http://<host>:{port})".format(port=port),
+        "Open it in the Tator dashboard at http://<host>:{port})".format(port=port),
         flush=True,
     )
     return session
@@ -200,6 +201,7 @@ def save_media_to_tmp(api: Any, project_id: int, media_objects: list[Any]) -> st
 
 def fetch_and_save_localizations(
     api: Any,
+    port: int,
     project_id: int,
     version_id: int | None = None,
     media_ids: list[int] | None = None,
@@ -213,7 +215,7 @@ def fetch_and_save_localizations(
     a subset of media; avoids empty results when project localizations are scoped to media).
     """
     base_dir = _project_tmp_dir(project_id)
-    out_path = os.path.join(base_dir, "localizations.jsonl")
+    out_path = os.path.join(base_dir, f"localizations_{port}.jsonl")
     print(f"[sync] Localizations JSONL will be saved to: {out_path}", flush=True)
     batch_size = LOCALIZATION_BATCH_SIZE
 
@@ -423,13 +425,6 @@ def _load_config(path: str) -> dict[str, Any]:
         if ext in (".yaml", ".yml"):
             return yaml.safe_load(f) or {}
         return json.load(f)
-
-
-def _sanitize_field_name(name: str) -> str:
-    """Convert to a valid FiftyOne field name."""
-    base = re.sub(r"[^a-zA-Z0-9]", "_", str(name))
-    base = re.sub(r"_+", "_", base).strip("_").lower()
-    return base or "unknown"
 
 
 def _load_localizations_index(jsonl_path: str) -> dict[str, dict]:
@@ -762,7 +757,7 @@ def build_fiftyone_dataset_from_crops(
         print(f"[sync] Reconcile: dataset {dataset_name} loaded", flush=True)
         return dataset
 
-    print(f"[sync] Reconcile: creating new dataset {dataset_name}", flush=True)
+    print(f"[sync] Reconcile: creating new dataset {dataset_name} in database {fo.config.database_name}", flush=True)
     dataset = fo.Dataset(dataset_name)
     dataset.persistent = True  # Persist dataset in MongoDB after session ends
     dataset.add_samples(samples)
@@ -804,10 +799,10 @@ def _default_dataset_name(api: Any, project_id: int, version_id: int | None) -> 
 def sync_edits_to_tator(
     project_id: int,
     version_id: int,
+    port: int,
     api_url: str,
     token: str,
     dataset_name: str | None = None,
-    database_name: str | None = None,
     label_attr: str | None = DEFAULT_LABEL_ATTR,
     score_attr: str | None = DEFAULT_SCORE_ATTR,
     debug: bool = False,
@@ -818,9 +813,12 @@ def sync_edits_to_tator(
     via update_localization_by_elemental_id.
     Returns {"status": "ok", "updated": int, "failed": int, "errors": list} or raises.
     """
-    fo.config.database_uri = get_database_uri()
-    resolved_db = database_name or get_database_name(project_id, None)
-    fo.config.database_name = resolved_db
+    db_entry = get_database_entry(project_id, port)
+    if db_entry is None:
+        raise ValueError(f"No database entry found for project_id={project_id} and port={port}")
+    db_name = database_name_from_uri(db_entry.uri)
+    fo.config.database_uri = db_entry.uri
+    fo.config.database_name = db_name
     os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
     os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
@@ -829,13 +827,13 @@ def sync_edits_to_tator(
     ds_name = dataset_name or _default_dataset_name(api, project_id, version_id)
     fallback_db = f"{os.environ.get('FIFTYONE_DATABASE_DEFAULT', 'fiftyone_project')}_{project_id}"
     if ds_name not in fo.list_datasets():
-        if resolved_db != fallback_db:
+        if db_name != fallback_db:
             fo.config.database_name = fallback_db
             os.environ["FIFTYONE_DATABASE_NAME"] = fallback_db
         if ds_name not in fo.list_datasets():
-            fo.config.database_name = resolved_db
+            fo.config.database_name = db_name
             raise ValueError(
-                f"Dataset '{ds_name}' not found in database '{resolved_db}' (or '{fallback_db}'). "
+                f"Dataset '{ds_name}' not found in database '{db_name}' (or '{fallback_db}'). "
                 "Run POST /sync first. Ensure FIFTYONE_DATABASE_URI and FIFTYONE_DATABASE_NAME match the sync process."
             )
 
@@ -898,6 +896,8 @@ def run_sync_job(
     api_url: str,
     token: str,
     port: int,
+    project_name: str,
+    database_uri: str | None = None,
     database_name: str | None = None,
     config_path: str | None = None,
     launch_app: bool = True,
@@ -905,12 +905,15 @@ def run_sync_job(
     """
     Entrypoint for RQ worker: all args are serializable. Calls sync_project_to_fiftyone.
     """
+    from database_manager import register_project_id_name
+    register_project_id_name(project_id, project_name)
     return sync_project_to_fiftyone(
         project_id=project_id,
         version_id=version_id,
         api_url=api_url,
         token=token,
         port=port,
+        database_uri=database_uri,
         database_name=database_name,
         config_path=config_path,
         launch_app=launch_app,
@@ -923,23 +926,23 @@ def sync_project_to_fiftyone(
     api_url: str,
     token: str,
     port: int,
+    database_uri: str | None = None,
     database_name: str | None = None,
     config_path: str | None = None,
     launch_app: bool = True,
 ) -> dict[str, Any]:
     """
     Fetch Tator media and localizations, build FiftyOne dataset, launch App on given port.
-    Uses per-project MongoDB database (resolved via database_name override or get_database_name).
+    Uses per-project MongoDB database (database_uri when provided, else resolved via config; database_name override or get_database_name).
     Returns {"status": "ok", "dataset_name": str, "database_name": str} or raises.
     """
     print(f"[sync] sync_project_to_fiftyone CALLED: project_id={project_id} version_id={version_id} api_url={api_url} port={port}", flush=True)
-    sess = get_session(project_id)
+    sess = get_session(project_id, port)
     resolved_db = (
         (database_name.strip() if database_name and database_name.strip() else None)
         or (sess.get("database_name") if sess else None)
-        or get_database_name(project_id, None)
     )
-    fo.config.database_uri = get_database_uri()
+    fo.config.database_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port)
     fo.config.database_name = resolved_db
     print(f"[sync] database_uri={fo.config.database_uri} database_name={resolved_db}", flush=True)
 
@@ -978,7 +981,7 @@ def sync_project_to_fiftyone(
                         print("saved_media_dir:", tmp_dir, flush=True)
             print(f"[sync] Fetching localizations...", flush=True)
             localizations_path = fetch_and_save_localizations(
-                api, project_id, version_id=version_id, media_ids=media_ids_list or None
+                api, port, project_id, version_id=version_id, media_ids=media_ids_list or None
             )
             if localizations_path:
                 print(f"[sync] saved_localizations_path (JSONL): {localizations_path}", flush=True)
@@ -1065,18 +1068,21 @@ def sync_project_to_fiftyone(
         embeddings_config = config.get("embeddings") or {}
         if not isinstance(embeddings_config, dict):
             embeddings_config = {}
-        # Resolve project key for embed service URL path. Many services expect project ID, not project name.
-        # Prefer config override, then use project_id (service often expects this), else project name as fallback.
-        embed_project_key = embeddings_config.get("project_name")
-        if embed_project_key is not None and str(embed_project_key).strip():
-            embed_project_key = str(embed_project_key).strip()
+        # Resolve project key for embed/VSS service: vss_project from DatabaseUriConfig (by project name), else embeddings config, else project_id.
+        project_name_for_config = None
+        try:
+            proj = api.get_project(project_id)
+            project_name_for_config = getattr(proj, "name", None) or str(project_id)
+        except Exception:
+            project_name_for_config = str(project_id)
+        vss_project = get_vss_project(project_name_for_config, port) if project_name_for_config else None
+        if vss_project is None or not str(vss_project).strip():
+            vss_project = embeddings_config.get("project_name")
+        if vss_project is None or not str(vss_project).strip():
+            vss_project = str(project_id)
         else:
-            # Default: use project ID so embed service (e.g. doris) receives a valid key; it often rejects project name.
-            embed_project_key = str(project_id)
-
-        # Do not change this; it is the project key for the embed service for testing
-        embed_project_key = "500055-VARS"
-        if embed_project_key:
+            vss_project = str(vss_project).strip()
+        if vss_project:
             model_info = {
                 "embeddings_field": embeddings_config.get("embeddings_field", "embeddings"),
                 "brain_key": embeddings_config.get("brain_key", "umap_viz"),
@@ -1091,7 +1097,7 @@ def sync_project_to_fiftyone(
                     force_embeddings=bool(embeddings_config.get("force_embeddings", False)),
                     force_umap=bool(embeddings_config.get("force_umap", False)),
                     batch_size=embeddings_config.get("batch_size"),
-                    project_name=embed_project_key,
+                    project_name=vss_project,
                     service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
                 )
                 print(f"[sync] Embeddings and UMAP completed for dataset '{dataset_name}'", flush=True)
@@ -1101,7 +1107,7 @@ def sync_project_to_fiftyone(
                 print(f"[sync] Embeddings/UMAP failed (dataset still available): {e}", flush=True)
                 logging.getLogger(__name__).exception("Embeddings/UMAP failed")
         else:
-            print("[sync] No embed project key; skipping embeddings/UMAP", flush=True)
+            print("[sync] No vss_project; skipping embeddings/UMAP", flush=True)
 
         if launch_app:
             # Reload dataset from MongoDB so the server (which loads from DB) sees the same state
@@ -1114,11 +1120,6 @@ def sync_project_to_fiftyone(
             print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
             # _stop_process_on_port(port)
             session = _launch_app_embedded(dataset, port)
-            # Push state immediately so the server has the correct dataset
-            try:
-                session.refresh()
-            except Exception as e:
-                logging.getLogger(__name__).debug("Session refresh after launch: %s", e)
             # Give the FiftyOne server time to start and accept state before the browser connects
             time.sleep(10)
             try:
@@ -1179,8 +1180,9 @@ def main() -> None:
         crop_localizations_parallel(download_dir, localizations_path, crops_dir, size=224)
 
     if crops_dir and localizations_path and os.path.isdir(crops_dir):
-        fo.config.database_uri = get_database_uri()
-        fo.config.database_name = get_database_name(project_id, None)
+        port = get_port_for_project(project_id)
+        fo.config.database_uri = get_database_uri(project_id, port)
+        fo.config.database_name = get_database_name(project_id, port, None)
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
         os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
         config_path = os.getenv("CONFIG_PATH")
@@ -1193,7 +1195,6 @@ def main() -> None:
             config=config,
             download_dir=download_dir,
         )
-        port = get_port_for_project(project_id)
         print(f"[sync] Launching FiftyOne app on port {port}...", flush=True)
         _stop_process_on_port(port)
         session = _launch_app_embedded(dataset, port)

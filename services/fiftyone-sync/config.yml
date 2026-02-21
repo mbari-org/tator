@@ -1,0 +1,11 @@
+# Example: per-project MongoDB URI and FiftyOne app port mapping.
+projects:
+  901902-uavs:
+    id: 4
+    vss_project: "500055-VARS"
+    databases:
+      - uri: "mongodb://localhost:27017"
+        port: 5151
+      - uri: "mongodb://localhost:27018"
+        port: 5152
+

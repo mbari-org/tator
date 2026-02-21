@@ -59,6 +59,8 @@ def enqueue_sync(
     api_url: str,
     token: str,
     port: int,
+    project_name: str,
+    database_uri: str | None = None,
     database_name: str | None = None,
     config_path: str | None = None,
     launch_app: bool = True,
@@ -66,6 +68,7 @@ def enqueue_sync(
     """
     Enqueue a sync job. Returns RQ job id.
     Caller must check is_queue_available() first.
+    project_name is used by the worker to resolve get_database_uri(project_id, port).
     """
     from rq import Queue
 
@@ -78,6 +81,8 @@ def enqueue_sync(
         api_url=api_url,
         token=token,
         port=port,
+        project_name=project_name,
+        database_uri=database_uri,
         database_name=database_name,
         config_path=config_path,
         launch_app=launch_app,

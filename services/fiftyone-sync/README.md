@@ -154,7 +154,7 @@ Go to the project, then **Analytics** → **Dashboards**. Open the applet. Click
 | Setting | Value | Who uses it |
 |---------|-------|-------------|
 | **URL** (Hosted Template) | `http://host.docker.internal:8001/render` | Tator (in Docker) fetches the template from the host. On Docker Desktop (Mac/Windows) use `host.docker.internal`. On Linux use the host IP (e.g. `172.17.0.1:8001`) or run sync in Docker on the same network. |
-| **base_port** | `5151` | Must match `port_manager.BASE_PORT`. |
+| **base_port** | `5151` | Must match `database_manager.BASE_PORT`. |
 | **iframe_host** | `localhost` | Host for the FiftyOne app URL when opening in a new tab. |
 | **sync_service_url** | `http://localhost:8001` | Required for the "Sync from Tator" button; same machine as Tator from the user's perspective. |
 | **api_url** | `http://localhost:8080` | Sync service calls Tator's API; from the host, Tator is at localhost:8080. |
@@ -190,7 +190,7 @@ Set `FIFTYONE_DATABASE_URI=mongodb://localhost:27017` (or override).
 
 ## Database and port allocation
 
-Single MongoDB; each Tator project gets its own database for isolation. One port per project: project 1 → 5151, project 2 → 5152, etc. (see `port_manager.BASE_PORT`).
+Single MongoDB; each Tator project gets its own database for isolation. One port per project: project 1 → 5151, project 2 → 5152, etc. (see `database_manager.BASE_PORT`).
 
 | Env var | Purpose |
 |--------|---------|
