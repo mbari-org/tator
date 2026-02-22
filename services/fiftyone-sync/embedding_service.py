@@ -29,6 +29,22 @@ def init_disk_cache() -> None:
     pass
 
 
+def is_embedding_service_available() -> bool:
+    """
+    Return True if the Fast-VSS embedding service is reachable (GET /projects).
+    Used by sync to skip embeddings when service is unavailable; same notion as GET /embedding-projects.
+    """
+    if not FASTVSS_BASE_URL:
+        return False
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(f"{FASTVSS_BASE_URL}/projects")
+            resp.raise_for_status()
+            return True
+    except Exception:
+        return False
+
+
 async def queue_embedding_job(
     image_bytes_list: list[bytes],
     cache_keys: list[str | None] | None = None,

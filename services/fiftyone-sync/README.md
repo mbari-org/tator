@@ -12,8 +12,8 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
 - **Port isolation**: One FiftyOne App instance per Tator project (one port per project)
   - Port = 5151 + (project_id - 1)
 
-- **MongoDB database isolation**: Each project uses its own FiftyOne (MongoDB) database by default
-  - Default: database name = `{FIFTYONE_DATABASE_DEFAULT}_{project_id}` (env `FIFTYONE_DATABASE_DEFAULT` defaults to `fiftyone_project`, so e.g. `fiftyone_project_1`, `fiftyone_project_2`)
+- **MongoDB database isolation**: A single MongoDB is launched by default (see `containers/fiftyone-sync`). **Project 1** uses database `fiftyone_project_1` on that instance; other projects use `fiftyone_project_2`, etc.
+  - Default: database name = `{FIFTYONE_DATABASE_DEFAULT}_{project_id}` (env `FIFTYONE_DATABASE_DEFAULT` defaults to `fiftyone_project`)
   - Override (all projects): set env `FIFTYONE_DATABASE_NAME` to use a single shared database
   - Override (per request): pass optional query param `database_name` on `GET /launch` and `POST /sync`
 
@@ -29,7 +29,30 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
 
 - **Background sync (Redis)**: For projects with millions of localizations, sync can run for a long time. To avoid blocking the web UI, use the **Redis queue** (same as the Tator compose stack). Set `REDIS_HOST=redis` (or your Redis host) for the API; run the sync worker with the same Redis and env (MongoDB, etc.): `python sync_worker.py`. The launcher will then enqueue sync on click and poll until the worker finishes. Redis env: `REDIS_HOST`, `REDIS_PORT` (default `6379`), `REDIS_PASSWORD`, `REDIS_USE_SSL`; or a single `REDIS_URL` (e.g. `redis://host:6380/0`).
 
-## Setup
+## Run (Docker)
+
+The service is intended to be run via the compose stack, which starts MongoDB and the API:
+
+```bash
+# From repo root
+docker compose -f containers/fiftyone-sync/compose.yaml up -d
+```
+
+API: http://localhost:8001. Optional env: copy `containers/fiftyone-sync/.env.example` to `containers/fiftyone-sync/.env` to set `FASTVSS_API_URL`, `REDIS_HOST`, etc.
+
+## Development
+
+For local iteration (no Docker for the API):
+
+```bash
+cd services/fiftyone-sync
+export FIFTYONE_DATABASE_URI=mongodb://localhost:27017
+uvicorn main:app --host 0.0.0.0 --port 8001
+```
+
+Use a venv and install deps first: `python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt`. Start MongoDB separately (e.g. `docker compose -f containers/fiftyone-sync/compose.yaml up -d mongo`).
+
+## Setup (for development)
 
 ```bash
 cd services/fiftyone-sync
@@ -39,22 +62,14 @@ pip install -r requirements.txt
 
 # Optional: install tator-py from repo
 pip install -e ../../scripts/packages/tator-py
-
-# Optional: install fiftyone (requires MongoDB) for full sync
-# pip install fiftyone
-```
-
-## Run
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8001
 ```
 
 ## Testing
 
 ### 1. Without Redis (inline sync)
 
-- Start the API and MongoDB (e.g. `docker compose up -d mongo` then `uvicorn main:app --host 0.0.0.0 --port 8001 --reload`).
+- **Docker**: `docker compose -f containers/fiftyone-sync/compose.yaml up -d` (API at http://localhost:8001).
+- **Development**: Start MongoDB only (`docker compose -f containers/fiftyone-sync/compose.yaml up -d mongo`), then run the API locally (see **Development** above).
 - In Tator, open a project that has the FiftyOne applet, then click **Sync from Tator**. The request runs to completion (may block a long time on large projects); when done, FiftyOne opens.
 - Or call the API directly (replace with your project id, API URL, token):
 
@@ -66,26 +81,26 @@ Response is the full sync result (no `job_id`).
 
 ### 2. With Redis (queued sync)
 
-1. **Start Redis** (same host or use Tator’s Redis):
-   ```bash
-   docker run -d --name redis -p 6379:6379 redis:7
-   # or use the redis service from the main Tator compose
-   ```
+**Docker**: Add `REDIS_HOST=redis` (and network to Tator’s Redis) or run Redis and set `REDIS_HOST` in `containers/fiftyone-sync/.env`. Run the sync worker in a separate container or on the host with the same env.
 
-2. **Start the API with Redis**:
+**Development**:
+
+1. Start Redis (e.g. `docker run -d --name redis -p 6379:6379 redis:7` or use Tator compose Redis).
+
+2. Start the API with Redis:
    ```bash
-   export REDIS_HOST=localhost   # or redis if same Docker network as Tator
-   export REDIS_PORT=6379        # optional; default 6379
+   cd services/fiftyone-sync
+   export FIFTYONE_DATABASE_URI=mongodb://localhost:27017
+   export REDIS_HOST=localhost
    uvicorn main:app --host 0.0.0.0 --port 8001
    ```
 
-3. **Start the sync worker** (in another terminal, same env as API: MongoDB, etc.):
+3. Start the sync worker (another terminal, same env):
    ```bash
    cd services/fiftyone-sync
    source .venv/bin/activate
    export REDIS_HOST=localhost
-   export REDIS_PORT=6379        # optional; use if Redis is not on 6379
-   export FIFTYONE_DATABASE_URI=mongodb://localhost:27017   # if needed
+   export FIFTYONE_DATABASE_URI=mongodb://localhost:27017
    python sync_worker.py
    ```
 
@@ -177,20 +192,20 @@ The Hosted Template URL is **fetched by Tator’s backend** (gunicorn), not by t
   - From the host: `curl http://localhost:8001/message` should return HTML.
   - From inside the Tator/gunicorn container: the same URL you put in the Hosted Template (e.g. `http://host.docker.internal:8001/message`) must work (e.g. `curl` from that container).
 
-## MongoDB (compose.yml)
+## MongoDB (compose stack)
 
-Use `compose.yml` for a single MongoDB instance. Per-project isolation is by database name (`fiftyone_project_1`, `fiftyone_project_2`, etc.):
+The compose stack in **`containers/fiftyone-sync`** launches a single MongoDB for the service. **Project 1** uses database `fiftyone_project_1` by default; other projects use `fiftyone_project_2`, etc., on the same instance.
 
 ```bash
-cd services/fiftyone-sync
-docker compose -f compose.yml up -d
+# From repo root
+docker compose -f containers/fiftyone-sync/compose.yaml up -d
 ```
 
-Set `FIFTYONE_DATABASE_URI=mongodb://localhost:27017` (or override).
+Set `FIFTYONE_DATABASE_URI=mongodb://localhost:27017` when running the API on the host (or `mongodb://mongo:27017` from a container on the same network). See `containers/fiftyone-sync/.env.example`.
 
 ## Database and port allocation
 
-Single MongoDB; each Tator project gets its own database for isolation. One port per project: project 1 → 5151, project 2 → 5152, etc. (see `database_manager.BASE_PORT`).
+Single MongoDB (launched via `containers/fiftyone-sync`); each Tator project gets its own database for isolation. One port per project: project 1 → 5151, project 2 → 5152, etc.
 
 | Env var | Purpose |
 |--------|---------|
@@ -220,7 +235,7 @@ Optional query param **`database_name`** on `GET /launch` and `POST /sync` overr
 
 ### Config file (YAML/JSON)
 
-Use `config_path` to pass a config file (e.g. `sample_config.yaml`):
+Use `config_path` to pass a config file path:
 
 ```yaml
 dataset_name: tator_project_dataset

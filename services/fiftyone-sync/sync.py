@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -135,8 +136,7 @@ def fetch_project_media_ids(
     else:
         media_list = api.get_media_list(project_id)
     media_ids = [m.id for m in media_list]
-    logger.info(f"fetch_project_media_ids: got {len(media_ids)} ids")
-    logger.info(f"Project {project_id} media count: {len(media_ids)}; ids: {media_ids}")
+    logger.info(f"Project {project_id} media count: {len(media_ids)}")
     return media_ids
 
 
@@ -169,16 +169,24 @@ def _is_video_name(name: str) -> bool:
     return any(name.lower().endswith(ext) for ext in VIDEO_EXTENSIONS)
 
 
-def save_media_to_tmp(api: Any, project_id: int, media_objects: list[Any]) -> str:
+def save_media_to_tmp(
+    api: Any,
+    project_id: int,
+    media_objects: list[Any],
+    media_ids_filter: set[int] | None = None,
+) -> str:
     """
     Download each media to a project-isolated /tmp folder, always under a 'download' subdir.
     Videos are skipped (download not supported). Existing non-empty files are skipped.
+    When media_ids_filter is provided, only media whose id is in the set are downloaded.
     Retries each download up to 3 times. Returns the download directory path.
     """
     base_dir = _project_tmp_dir(project_id)
     out_dir = os.path.join(base_dir, "download")
     os.makedirs(out_dir, exist_ok=True)
     valid = [m for m in media_objects if isinstance(m, tator.models.Media)]
+    if media_ids_filter is not None:
+        valid = [m for m in valid if m.id in media_ids_filter]
     total = len(valid)
     logger.info(f"Saving {total} media files to {out_dir}")
     for idx, m in enumerate(valid, 1):
@@ -356,13 +364,22 @@ def crop_localizations_parallel(
     crops_dir: str,
     size: int = 224,
     max_workers: int | None = None,
+    locs_to_crop: list[dict] | None = None,
 ) -> tuple[int, int]:
     """
-    Crop all localizations from their media in parallel. Saves using elemental_id as filestem (e.g. elemental_id.png).
+    Crop localizations from their media in parallel.
+    Saves using elemental_id as filestem (e.g. elemental_id.png).
+
+    When locs_to_crop is provided, only those localizations are cropped (cache-miss
+    optimization). Otherwise falls back to reading all localizations from the JSONL.
+
     Returns (num_cropped, num_failed).
     """
-    if not os.path.exists(download_dir) or not os.path.exists(localizations_jsonl_path):
-        logger.info("Download dir or localizations JSONL missing; skipping crops")
+    if not os.path.exists(download_dir):
+        logger.info("Download dir missing; skipping crops")
+        return (0, 0)
+    if locs_to_crop is None and not os.path.exists(localizations_jsonl_path):
+        logger.info("Localizations JSONL missing and no locs_to_crop provided; skipping crops")
         return (0, 0)
     download_path = Path(download_dir)
     crops_path = Path(crops_dir)
@@ -377,23 +394,31 @@ def crop_localizations_parallel(
                     media_id_to_path[mid] = f
                 except ValueError:
                     pass
+
+    if locs_to_crop is not None:
+        loc_list = locs_to_crop
+    else:
+        loc_list = []
+        with open(localizations_jsonl_path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    loc_list.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
     locs_by_media: dict[int, list[dict]] = {}
-    with open(localizations_jsonl_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                loc = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            media_id = loc.get("media")
-            if media_id is None:
-                continue
-            mid = int(media_id)
-            if mid not in locs_by_media:
-                locs_by_media[mid] = []
-            locs_by_media[mid].append(loc)
+    for loc in loc_list:
+        media_id = loc.get("media")
+        if media_id is None:
+            continue
+        mid = int(media_id)
+        if mid not in locs_by_media:
+            locs_by_media[mid] = []
+        locs_by_media[mid].append(loc)
+
     tasks: list[tuple[Path, dict, Path]] = []
     for mid, locs in locs_by_media.items():
         image_path = media_id_to_path.get(mid)
@@ -464,6 +489,186 @@ def _box_hash(loc: dict | None) -> str:
     return hashlib.sha256(
         f"{x}|{y}|{w}|{h}".encode()
     ).hexdigest()
+
+
+def _crop_manifest_path(project_id: int, port: int) -> str:
+    """Path to the crop manifest JSON for a project/port combination."""
+    return os.path.join(_project_tmp_dir(project_id), f"crop_manifest_{port}.json")
+
+
+def _load_crop_manifest(project_id: int, port: int) -> dict[str, dict]:
+    """
+    Load the crop manifest from disk.
+    Returns {elemental_id: {"box_hash": str, "media_id": int, "media_stem": str}} or empty dict.
+    """
+    path = _crop_manifest_path(project_id, port)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        logger.info(f"Could not load crop manifest {path}: {e}")
+        return {}
+
+
+def _save_crop_manifest(project_id: int, port: int, manifest: dict[str, dict]) -> None:
+    """Atomically write the crop manifest to disk."""
+    path = _crop_manifest_path(project_id, port)
+    tmp_path = path + ".tmp"
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(manifest, f)
+        os.replace(tmp_path, path)
+    except OSError as e:
+        logger.info(f"Could not save crop manifest {path}: {e}")
+
+
+def _cleanup_download_dir(project_id: int) -> None:
+    """Remove the download directory to reclaim disk space after crops are produced."""
+    download_dir = os.path.join(_project_tmp_dir(project_id), "download")
+    if os.path.isdir(download_dir):
+        try:
+            shutil.rmtree(download_dir)
+            logger.info(f"Removed download directory: {download_dir}")
+        except OSError as e:
+            logger.info(f"Could not remove download directory {download_dir}: {e}")
+
+
+def _find_crop_cache_misses(
+    localizations_jsonl_path: str,
+    crops_dir: str,
+    manifest: dict[str, dict],
+    download_dir: str | None = None,
+) -> tuple[set[int], list[dict], dict[str, dict]]:
+    """
+    Diff current localizations against the crop manifest and on-disk crop files.
+    A localization is a "miss" (needs cropping) when:
+      - its elemental_id is absent from the manifest, OR
+      - its box_hash differs from the manifest entry, OR
+      - the crop file does not exist on disk.
+
+    The media_stem for each localization is resolved in priority order:
+    The media_stem for each localization is resolved in priority order:
+      1. From the existing manifest entry (survives download-dir cleanup)
+      2. From files currently in the download directory
+      3. Bare media_id as fallback (new localizations on first encounter)
+
+    Returns:
+        media_ids_needed: set of media IDs that must be downloaded (have >= 1 miss)
+        locs_to_crop:     list of localization dicts that need cropping
+        updated_manifest:  new manifest reflecting current localizations (to be saved after cropping)
+    """
+    download_stem_map = _media_id_to_stem(download_dir) if download_dir else {}
+
+    manifest_stem_map: dict[int, str] = {}
+    for entry in manifest.values():
+        mid = entry.get("media_id")
+        stem = entry.get("media_stem")
+        if mid is not None and stem:
+            manifest_stem_map[int(mid)] = stem
+
+    crops_path = Path(crops_dir)
+
+    media_ids_needed: set[int] = set()
+    locs_to_crop: list[dict] = []
+    updated_manifest: dict[str, dict] = {}
+
+    with open(localizations_jsonl_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                loc = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            eid = loc.get("elemental_id") or loc.get("id")
+            if eid is None:
+                continue
+            eid = str(eid)
+            media_id = loc.get("media")
+            if media_id is None:
+                continue
+            mid = int(media_id)
+            current_hash = _box_hash(loc)
+
+            media_stem = (
+                manifest_stem_map.get(mid)
+                or download_stem_map.get(mid)
+                or f"{mid}"
+            )
+
+            updated_manifest[eid] = {
+                "box_hash": current_hash,
+                "media_id": mid,
+                "media_stem": media_stem,
+            }
+
+            old_entry = manifest.get(eid)
+            crop_file = crops_path / media_stem / f"{eid}.png"
+
+            is_miss = (
+                old_entry is None
+                or old_entry.get("box_hash") != current_hash
+                or not crop_file.exists()
+            )
+            if is_miss:
+                media_ids_needed.add(mid)
+                locs_to_crop.append(loc)
+
+    total_locs = len(updated_manifest)
+    hits = total_locs - len(locs_to_crop)
+    logger.info(
+        f"Crop cache: {total_locs} localizations, {hits} hits, "
+        f"{len(locs_to_crop)} misses across {len(media_ids_needed)} media"
+    )
+    return media_ids_needed, locs_to_crop, updated_manifest
+
+
+def _patch_manifest_stems(manifest: dict[str, dict], download_dir: str) -> None:
+    """
+    After downloading new media, update manifest entries whose media_stem is
+    still a bare media_id (fallback) with the real stem from the download directory.
+    """
+    real_stems = _media_id_to_stem(download_dir)
+    if not real_stems:
+        return
+    for entry in manifest.values():
+        mid = entry.get("media_id")
+        if mid is None:
+            continue
+        mid = int(mid)
+        current_stem = entry.get("media_stem", "")
+        if current_stem == str(mid) and mid in real_stems:
+            entry["media_stem"] = real_stems[mid]
+
+
+def _cleanup_deleted_crops(
+    manifest: dict[str, dict],
+    updated_manifest: dict[str, dict],
+    crops_dir: str,
+) -> int:
+    """
+    Remove crop files for localizations that were deleted in Tator
+    (present in old manifest but absent from updated_manifest).
+    Returns count of files removed.
+    """
+    removed = 0
+    deleted_eids = set(manifest.keys()) - set(updated_manifest.keys())
+    for eid in deleted_eids:
+        entry = manifest[eid]
+        media_stem = entry.get("media_stem", str(entry.get("media_id", "")))
+        crop_file = Path(crops_dir) / media_stem / f"{eid}.png"
+        if crop_file.exists():
+            try:
+                crop_file.unlink()
+                removed += 1
+            except OSError:
+                pass
+    if removed:
+        logger.info(f"Cleaned up {removed} orphaned crop files ({len(deleted_eids)} deleted localizations)")
+    return removed
 
 
 def _content_hash(label: Any, confidence: Any) -> str:
@@ -691,7 +896,6 @@ def build_fiftyone_dataset_from_crops(
 
     # Load localizations index by elemental_id
     loc_index = _load_localizations_index(localizations_jsonl_path)
-    logger.info(f"loc_index={loc_index}")
     logger.info(f"Loaded {len(loc_index)} localizations from JSONL")
 
     # Collect crop filepaths
@@ -724,12 +928,10 @@ def build_fiftyone_dataset_from_crops(
             api_url = config.get("source_url")
             project_id = config.get("project_id")
             version_id = config.get("version_id")
-            logger.info(f"loc={loc} api_url={api_url} project_id={project_id} version_id={version_id}")
             if loc and api_url and project_id is not None:
                 tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
                 if tator_url:
                     sample["annotation"] = tator_url
-                    logger.info(f"tator_url={tator_url}")
             sample.tags.append(label)
             if loc:
                 attrs = loc.get("attributes") or {}
@@ -864,17 +1066,45 @@ def sync_edits_to_tator(
     host = api_url.rstrip("/")
     api = tator.get_api(host, token)
     ds_name = dataset_name or _default_dataset_name(api, project_id, version_id)
+
+    # Resolve dataset by project name + port (datasets may have been created
+    # with a version component or port suffix that differs from _default_dataset_name).
+    try:
+        _proj = api.get_project(project_id)
+        project_prefix = _sanitize_dataset_name(_proj.name) if _proj.name else f"project_{project_id}"
+    except Exception:
+        project_prefix = f"project_{project_id}"
+    port_suffix = f"_{port}"
+
+    def _resolve_dataset(requested: str) -> str | None:
+        """Return the actual dataset name: exact match first, then project+port match."""
+        available = fo.list_datasets()
+        if requested in available:
+            return requested
+        matches = [d for d in available
+                   if d.startswith(project_prefix) and d.endswith(port_suffix)]
+        if not matches:
+            return None
+        if len(matches) == 1:
+            return matches[0]
+        for candidate in matches:
+            if candidate == f"{project_prefix}{port_suffix}":
+                return candidate
+        return matches[0]
+
     fallback_db = f"{os.environ.get('FIFTYONE_DATABASE_DEFAULT', 'fiftyone_project')}_{project_id}"
-    if ds_name not in fo.list_datasets():
-        if db_name != fallback_db:
-            fo.config.database_name = fallback_db
-            os.environ["FIFTYONE_DATABASE_NAME"] = fallback_db
-        if ds_name not in fo.list_datasets():
-            fo.config.database_name = db_name
-            raise ValueError(
-                f"Dataset '{ds_name}' not found in database '{db_name}' (or '{fallback_db}'). "
-                "Run POST /sync first. Ensure FIFTYONE_DATABASE_URI and FIFTYONE_DATABASE_NAME match the sync process."
-            )
+    resolved = _resolve_dataset(ds_name)
+    if resolved is None and db_name != fallback_db:
+        fo.config.database_name = fallback_db
+        os.environ["FIFTYONE_DATABASE_NAME"] = fallback_db
+        resolved = _resolve_dataset(ds_name)
+    if resolved is None:
+        fo.config.database_name = db_name
+        raise ValueError(
+            f"No dataset matching project '{project_prefix}' with port {port} found in database '{db_name}' (or '{fallback_db}'). "
+            "Run POST /sync first. Ensure FIFTYONE_DATABASE_URI and FIFTYONE_DATABASE_NAME match the sync process."
+        )
+    ds_name = resolved
 
     dataset = fo.load_dataset(ds_name)
 
@@ -1003,30 +1233,67 @@ def sync_project_to_fiftyone(
         try:
             host = api_url.rstrip("/")
             api = tator.get_api(host, token)
-            logger.info(f"Fetching media IDs... {host} {token} {project_id} {api_url}")
+
+            # 1. Fetch media IDs (lightweight metadata, needed for localization query)
+            logger.info(f"Fetching media IDs... {host} {project_id} {api_url}")
             media_ids_list = fetch_project_media_ids(api_url, token, project_id)
-            if not media_ids_list:
-                logger.info(f"No media IDs for project {project_id}; skipping download")
-            else:
-                logger.info("media_ids:", media_ids_list)
-                logger.info(f"Getting media objects in chunks...")
-                all_media = get_media_chunked(api, project_id, media_ids_list)
-                if not all_media:
-                    logger.info(f"No Media objects returned for {len(media_ids_list)} ids; skipping download")
-                else:
-                    logger.info(f"Saving {len(all_media)} media to tmp...")
-                    tmp_dir = save_media_to_tmp(api, project_id, all_media)
-                    if tmp_dir:
-                        logger.info("saved_media_dir:", tmp_dir)
-            logger.info(f"Fetching localizations...")
+
+            # 2. Fetch localizations first (cheap metadata)
+            logger.info("Fetching localizations...")
             localizations_path = fetch_and_save_localizations(
                 api, port, project_id, version_id=version_id, media_ids=media_ids_list or None
             )
             if localizations_path:
                 logger.info(f"saved_localizations_path (JSONL): {localizations_path}")
-            if tmp_dir and localizations_path:
-                crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
-                crop_localizations_parallel(tmp_dir, localizations_path, crops_dir, size=224)
+
+            crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
+            tmp_dir = os.path.join(_project_tmp_dir(project_id), "download")
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            # 3. Determine which crops are missing or stale (cache miss)
+            old_manifest = _load_crop_manifest(project_id, port)
+            media_ids_needed, locs_to_crop, updated_manifest = _find_crop_cache_misses(
+                localizations_jsonl_path=localizations_path,
+                crops_dir=crops_dir,
+                manifest=old_manifest,
+                download_dir=tmp_dir,
+            )
+
+            # 4. Clean up orphaned crop files for deleted localizations
+            _cleanup_deleted_crops(old_manifest, updated_manifest, crops_dir)
+
+            # 5. Download only media that have cache misses
+            if not media_ids_list:
+                logger.info(f"No media IDs for project {project_id}; skipping download")
+            elif not media_ids_needed:
+                logger.info(f"All {len(updated_manifest)} crops are cached; skipping media download")
+            else:
+                needed_ids = [mid for mid in media_ids_list if mid in media_ids_needed]
+                logger.info(f"Getting {len(needed_ids)}/{len(media_ids_list)} media objects (cache misses)...")
+                all_media = get_media_chunked(api, project_id, needed_ids)
+                if not all_media:
+                    logger.info(f"No Media objects returned for {len(needed_ids)} ids; skipping download")
+                else:
+                    logger.info(f"Downloading {len(all_media)} media to tmp...")
+                    tmp_dir = save_media_to_tmp(api, project_id, all_media, media_ids_filter=media_ids_needed)
+
+            # 6. Crop only the cache-miss localizations
+            if locs_to_crop and localizations_path:
+                crop_localizations_parallel(
+                    tmp_dir, localizations_path, crops_dir, size=224, locs_to_crop=locs_to_crop,
+                )
+            elif not locs_to_crop:
+                logger.info("No crop cache misses; skipping crop step")
+
+            # 7. Patch manifest stems from actual downloaded filenames
+            _patch_manifest_stems(updated_manifest, tmp_dir)
+
+            # 8. Persist the updated manifest
+            _save_crop_manifest(project_id, port, updated_manifest)
+
+            # 9. Remove downloaded media to reclaim disk space
+            _cleanup_download_dir(project_id)
+
         except Exception as e:
             logger.info(f"fetch/save media or localizations failed: {e}")
             return {
@@ -1038,8 +1305,8 @@ def sync_project_to_fiftyone(
                 "saved_crops_dir": crops_dir or None,
             }
 
-        if not crops_dir or not localizations_path:
-            logger.info(f"No crops or localizations; skipping dataset build")
+        if not localizations_path:
+            logger.info("No localizations; skipping dataset build")
             return {
                 "status": "ok",
                 "message": "No crops to load; media/localizations missing or empty",
@@ -1125,19 +1392,25 @@ def sync_project_to_fiftyone(
                 "brain_key": embeddings_config.get("brain_key", "umap_viz"),
             }
             try:
+                from embedding_service import is_embedding_service_available
                 from embeddings_viz import compute_embeddings_and_viz
 
-                compute_embeddings_and_viz(
-                    dataset,
-                    model_info,
-                    umap_seed=int(embeddings_config.get("umap_seed", 51)),
-                    force_embeddings=bool(embeddings_config.get("force_embeddings", False)),
-                    force_umap=bool(embeddings_config.get("force_umap", False)),
-                    batch_size=embeddings_config.get("batch_size"),
-                    project_name=vss_project,
-                    service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
-                )
-                logger.info(f"Embeddings and UMAP completed for dataset '{dataset_name}'")
+                if not is_embedding_service_available():
+                    logger.info(
+                        "Embedding service unavailable; skipping embeddings/UMAP (dataset still available)"
+                    )
+                else:
+                    compute_embeddings_and_viz(
+                        dataset,
+                        model_info,
+                        umap_seed=int(embeddings_config.get("umap_seed", 51)),
+                        force_embeddings=bool(embeddings_config.get("force_embeddings", False)),
+                        force_umap=bool(embeddings_config.get("force_umap", False)),
+                        batch_size=embeddings_config.get("batch_size"),
+                        project_name=vss_project,
+                        service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
+                    )
+                    logger.info(f"Embeddings and UMAP completed for dataset '{dataset_name}'")
             except ImportError as e:
                 logger.info(f"Skipping embeddings/UMAP (missing deps): {e}")
             except Exception as e:
@@ -1157,8 +1430,6 @@ def sync_project_to_fiftyone(
             logger.info(f"Launching FiftyOne app on port {port}...")
             # _stop_process_on_port(port)
             session = _launch_app_embedded(dataset, port)
-            # Give the FiftyOne server time to start and accept state before the browser connects
-            time.sleep(10)
             try:
                 session.refresh()
             except Exception as e:
@@ -1193,36 +1464,71 @@ def main() -> None:
     if media_ids_str:
         media_ids_filter = [int(id_.strip()) for id_ in media_ids_str.split(",") if id_.strip()]
 
-    media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
-    logger.info("media_ids:", media_ids)
     api = tator.get_api(host, token)
-    if media_ids:
-        all_media = get_media_chunked(api, project_id, media_ids)
-        if all_media:
-            saved_dir = save_media_to_tmp(api, project_id, all_media)
-            logger.info("saved_media_dir:", saved_dir)
-        else:
-            logger.info("No Media objects returned; download skipped.")
     version_id_str = os.getenv("VERSION_ID", "").strip()
     version_id = int(version_id_str) if version_id_str else None
+
+    project_name_cli = None
+    try:
+        project_name_cli = getattr(api.get_project(project_id), "name", None) or str(project_id)
+    except Exception:
+        project_name_cli = str(project_id)
+    port = get_port_for_project(project_id, project_name=project_name_cli)
+
+    # Fetch media IDs (lightweight)
+    media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
+    logger.info("media_ids: %s", media_ids)
+
+    # Fetch localizations first (cheap metadata)
     localizations_path = fetch_and_save_localizations(
-        api, project_id, version_id=version_id, media_ids=media_ids if media_ids else None
+        api, port, project_id, version_id=version_id, media_ids=media_ids if media_ids else None
     )
     if localizations_path:
-        logger.info("saved_localizations_path (JSONL):", localizations_path)
+        logger.info("saved_localizations_path (JSONL): %s", localizations_path)
+
     base_dir = _project_tmp_dir(project_id)
     download_dir = os.path.join(base_dir, "download")
+    os.makedirs(download_dir, exist_ok=True)
     crops_dir = os.path.join(base_dir, "crops")
-    if os.path.isdir(download_dir) and localizations_path:
-        crop_localizations_parallel(download_dir, localizations_path, crops_dir, size=224)
+
+    # etermine cache misses
+    if localizations_path:
+        old_manifest = _load_crop_manifest(project_id, port)
+        media_ids_needed, locs_to_crop, updated_manifest = _find_crop_cache_misses(
+            localizations_jsonl_path=localizations_path,
+            crops_dir=crops_dir,
+            manifest=old_manifest,
+            download_dir=download_dir,
+        )
+        _cleanup_deleted_crops(old_manifest, updated_manifest, crops_dir)
+
+        # Download only media with cache misses
+        if media_ids and media_ids_needed:
+            needed_ids = [mid for mid in media_ids if mid in media_ids_needed]
+            all_media = get_media_chunked(api, project_id, needed_ids)
+            if all_media:
+                save_media_to_tmp(api, project_id, all_media, media_ids_filter=media_ids_needed)
+            else:
+                logger.info("No Media objects returned; download skipped.")
+        elif not media_ids_needed:
+            logger.info("All crops cached; skipping media download")
+
+        # Crop only cache misses
+        if locs_to_crop:
+            crop_localizations_parallel(
+                download_dir, localizations_path, crops_dir, size=224, locs_to_crop=locs_to_crop,
+            )
+
+        # Patch manifest stems from actual downloaded filenames
+        _patch_manifest_stems(updated_manifest, download_dir)
+
+        # Save updated manifest
+        _save_crop_manifest(project_id, port, updated_manifest)
+
+        # Remove downloaded media to reclaim disk space
+        _cleanup_download_dir(project_id)
 
     if crops_dir and localizations_path and os.path.isdir(crops_dir):
-        project_name_cli = None
-        try:
-            project_name_cli = getattr(api.get_project(project_id), "name", None) or str(project_id)
-        except Exception:
-            project_name_cli = str(project_id)
-        port = get_port_for_project(project_id, project_name=project_name_cli)
         fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name_cli)
         fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri

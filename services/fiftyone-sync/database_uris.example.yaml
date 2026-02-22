@@ -1,10 +1,19 @@
 # Example: per-project MongoDB URI and FiftyOne app port mapping.
 # Set FIFTYONE_DATABASE_URI_CONFIG to this file path.
+# Default (no config): use FIFTYONE_DATABASE_URI; project 1 → fiftyone_project_1 on that URI.
+#
+# Single MongoDB for project 1 (matches containers/fiftyone-sync stack):
 projects:
-  901902-uavs:
-    vss_project: "500055-VARS"
+  "1":
     databases:
-      - uri: "mongodb://localhost:27017/uavs_1"
+      - uri: "mongodb://localhost:27017"
         port: 5151
-      - uri: "mongodb://localhost:27018/uavs_2"
-        port: 5152
+#
+# Multi-project example (optional second Mongo):
+#  901902-uavs:
+#    vss_project: "500055-VARS"
+#    databases:
+#      - uri: "mongodb://localhost:27017/uavs_1"
+#        port: 5151
+#      - uri: "mongodb://localhost:27018/uavs_2"
+#        port: 5152

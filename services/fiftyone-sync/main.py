@@ -77,6 +77,20 @@ async def post_embed(
         image_bytes_list.append(data)
     if not image_bytes_list:
         raise HTTPException(status_code=400, detail="No images provided")
+    if not FASTVSS_BASE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail="Embedding service unavailable: FASTVSS_API_URL is not set",
+        )
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(f"{FASTVSS_BASE_URL}/projects")
+            resp.raise_for_status()
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Embedding service unavailable: {e!s}",
+        ) from e
     job_id = await queue_embedding_job(image_bytes_list, project=project)
     return EmbedResponse(uuid=job_id)
 
@@ -129,7 +143,7 @@ async def get_embedding_projects() -> dict:
 # database-info is called with project_id; send api_url and Authorization to resolve to config key (project name).
 # Embedding service status: server uses FASTVSS_API_URL; GET /embedding-projects shows availability.
 # FiftyOne opens in a new window/tab (Open FiftyOne button); no iframe.
-LAUNCHER_TEMPLATE = """
+LAUNCHER_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -182,7 +196,6 @@ LAUNCHER_TEMPLATE = """
           <th>Token</th>
           <td>
             <div class="cell-controls">
-              <label for="user-token">API token:</label>
               <input type="password" id="user-token" placeholder="Your Tator API token" autocomplete="off" />
               <a href="{{ ((api_url | default('')).rstrip('/') ~ '/token') | e }}" target="_blank" rel="noopener" class="token-link">Get your token</a>
               <button type="button" id="test-token-btn">Test token</button>
@@ -203,7 +216,7 @@ LAUNCHER_TEMPLATE = """
           <th>Sync</th>
           <td>
             <div class="cell-controls">
-              <button type="button" id="sync-from-tator-btn" disabled title="Loads the selected version and launches a Voxel51 (FiftyOne) viewer in another tab."><span class="btn-icon" aria-hidden="true">←</span>Load from Tator</button>
+              <button type="button" id="sync-from-tator-btn" disabled title="Loads the selected version and launches a Voxel51 (FiftyOne) viewer in another tab. If the Embedding Service is not available, the viewer will still launch but will not contain embeddings."><span class="btn-icon" aria-hidden="true">←</span>Load from Tator</button>
               <button type="button" id="sync-to-tator-btn" disabled title="Pushes any revised data from FiftyOne back to the selected version.">Sync to Tator<span class="btn-icon end" aria-hidden="true">→</span></button>
               <span id="sync-status" class="sync-status" aria-live="polite"></span>
             </div>
@@ -245,19 +258,21 @@ LAUNCHER_TEMPLATE = """
       var tokenInput = document.getElementById('user-token');
       var testTokenBtn = document.getElementById('test-token-btn');
       var tokenVerified = false;
+      var hasDatabaseEntry = false;
       var versionId = '';
       function getToken() {
         return tokenInput ? tokenInput.value.trim() : '';
       }
       function setVersionFromDropdown() {
         versionId = versionSelect && versionSelect.value ? versionSelect.value : '';
-        if (syncToTatorBtn) syncToTatorBtn.disabled = !tokenVerified || !versionId;
+        if (syncBtn) syncBtn.disabled = !tokenVerified || !hasDatabaseEntry;
+        if (syncToTatorBtn) syncToTatorBtn.disabled = !tokenVerified || !hasDatabaseEntry || !versionId;
       }
       function setSyncControlsEnabled(enabled) {
         tokenVerified = enabled;
         if (versionSelect) versionSelect.disabled = !enabled;
-        if (syncBtn) syncBtn.disabled = !enabled;
-        if (syncToTatorBtn) syncToTatorBtn.disabled = !enabled || !versionId;
+        if (syncBtn) syncBtn.disabled = !enabled || !hasDatabaseEntry;
+        if (syncToTatorBtn) syncToTatorBtn.disabled = !enabled || !hasDatabaseEntry || !versionId;
       }
       function loadVersions(token) {
         if (!versionSelect || !syncServiceUrl || !apiUrl || !token) return;
@@ -331,10 +346,14 @@ LAUNCHER_TEMPLATE = """
               var databaseInfoUrl = syncServiceUrl + '/database-info?project_id=' + project + '&api_url=' + encodeURIComponent(apiUrl) + '&port=' + port;
               fetch(databaseInfoUrl, { headers: { 'Authorization': 'Token ' + token } })
                 .then(function(r) {
-                  if (!r.ok) return null;
+                  if (!r.ok) return r.json().catch(function() { return null; }).then(function(d) {
+                    var detail = (d && d.detail) ? d.detail : 'No database entry for this project/port';
+                    throw new Error(detail);
+                  });
                   return r.json();
                 })
                 .then(function(d) {
+                  hasDatabaseEntry = true;
                   if (d && d.port != null) {
                     port = d.port;
                     appUrl = 'http://' + iframeHost + ':' + port + '/';
@@ -342,11 +361,16 @@ LAUNCHER_TEMPLATE = """
                   }
                   if (d && d.database_name) databaseName = d.database_name;
                   if (d && d.database_uri) databaseUri = d.database_uri;
-                })
-                .catch(function() {})
-                .finally(function() {
+                  setSyncControlsEnabled(true);
                   syncStatus.textContent = 'Token OK. Sync enabled.';
+                  syncStatus.classList.remove('error');
                   setTimeout(function() { syncStatus.textContent = ''; }, 3000);
+                })
+                .catch(function(err) {
+                  hasDatabaseEntry = false;
+                  setSyncControlsEnabled(true);
+                  syncStatus.textContent = 'Token OK but sync disabled: ' + (err.message || 'no database entry for this project');
+                  syncStatus.classList.add('error');
                 });
             })
             .catch(function(err) {
@@ -390,7 +414,7 @@ LAUNCHER_TEMPLATE = """
             }
           })
           .catch(function(err) {
-            el.textContent = 'Unavailable: ' + (err.message || 'Network error');
+            el.textContent = err.message || 'Network error';
             el.classList.add('error');
           });
       })();

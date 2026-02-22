@@ -1,0 +1,48 @@
+# FiftyOne sync stack: MongoDB + fiftyone-sync API. Single MongoDB for project 1 (default).
+# Per-project isolation is by database name (fiftyone_project_1, fiftyone_project_2, ...).
+#
+# Usage (from repo root):
+#   docker compose -f containers/fiftyone-sync/compose.yaml up -d
+#
+# API: http://localhost:8001
+# Optional: use the main Tator stack Redis for queued sync (REDIS_HOST=redis, same network).
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: fiftyone-sync-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    command: --dbpath /data/db --port 27017 --bind_ip_all
+    restart: unless-stopped
+    networks:
+      - fiftyone-sync
+
+  api:
+    build:
+      context: ../..
+      dockerfile: containers/fiftyone-sync/Dockerfile
+    image: fiftyone-sync:latest
+    container_name: fiftyone-sync-api
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - FIFTYONE_DATABASE_URI=mongodb://mongo:27017
+    ports:
+      - "8001:8001"
+    depends_on:
+      - mongo
+    restart: unless-stopped
+    networks:
+      - fiftyone-sync
+
+networks:
+  fiftyone-sync:
+    name: fiftyone-sync
+
+volumes:
+  mongodb_data:
+    driver: local
