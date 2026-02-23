@@ -1,7 +1,7 @@
 """
 Database manager: maps (project_id, port) to a database (URI + name) and maintains
-one unique session per (project_id, port). Uses FIFTYONE_DATABASE_URI / FIFTYONE_DATABASE_NAME
-when no config is set; optional YAML config (FIFTYONE_DATABASE_URI_CONFIG) keyed by project name
+one unique session per (project_id, port). 
+Uses optional YAML config (FIFTYONE_DATABASE_URI_CONFIG) keyed by project name
 for per-project, per-port databases.
 """
 
@@ -30,9 +30,9 @@ _sessions: dict[tuple[int, int], dict[str, Any]] = {}
 
 # Cached config lookup: key is (project_name: str, port: int), value is DatabaseEntry.
 _config: dict[tuple[str, int], DatabaseEntry] | None = None
+
 # Full YAML config for get_vss_project (project name -> ProjectConfig).
 _yaml_config: DatabaseUriConfig | None = None
-
 
 # Optional registry: project_id -> project_name (set by run_sync_job so workers can resolve without API).
 _project_id_to_name: dict[int, str] = {}

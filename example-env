@@ -8,6 +8,9 @@ PORT=8080
 # Docker registry for Tator images
 REGISTRY=mbari
 
+# Node.js installation directory (used for building UI assets)
+NODE_INSTALL_DIR=${HOME}/npm
+
 # Path to local Tator data directory
 DATA_DIR=${HOME}/tator_data
 
@@ -81,3 +84,6 @@ STATIC_MAX_AGE=2592000
 
 # Set this true to enable alt bucket tests
 HAS_ALT_BUCKET=true
+
+# Fast-VSS embedding service base URL (no trailing slash)
+FASTVSS_API_URL=http://localhost:8000

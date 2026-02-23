@@ -1,0 +1,22 @@
+# Example: per-project MongoDB URI and FiftyOne app port mapping.
+# See containers/fiftyone-sync for more information.
+# projects:
+#   ObjectDetection:
+#     databases:
+#       - uri: "mongodb://localhost:27017"
+#         port: 5151
+#   VideoSegmentation:
+#     databases:
+#       - uri: "mongodb://localhost:27018"
+#         port: 5152
+#   #
+# Multi-project aexample (optional second Mongo per project) with a reference to the VSS service to compute embeddings:
+projects:
+  901902-uavs:
+    vss_project: "500055-VARS"
+    vss_service: "http://doris.shore.mbari.org:8000"
+    databases:
+      - uri: "mongodb://localhost:27017"
+        port: 5151
+      - uri: "mongodb://localhost:27018"
+        port: 5152

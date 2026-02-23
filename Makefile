@@ -31,7 +31,7 @@ OPERATIONS=reset logs bash
 
 IMAGES=ui-image postgis-image client-image transcode-image
 
-GIT_VERSION="c598eeebb06c3adad4d3208ba4d7dccfea9363f1" #$(shell git rev-parse HEAD)
+GIT_VERSION=$(shell git rev-parse HEAD)
 
 # Get python version and set yaml arguments correctly
 PYTHON3_REVISION=$(shell python3 --version | grep ^Python | sed 's/^.* //g' | awk -F. '{print $$2}')
@@ -52,6 +52,30 @@ TATOR_JS_MODULE_FILE=ui/server/static/tator.min.js
 ifeq ($(REGISTRY),None)
 REGISTRY=cvisionai
 endif
+
+# Node.js installation
+NODE_VERSION=v20.11.1
+
+ifeq ($(NODE_INSTALL_DIR),None)
+NODE_INSTALL_DIR=/tmp/npm
+endif
+NODE_INSTALL_DIR ?= /tmp/npm
+
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_S),Darwin)
+  NODE_OS := darwin
+else
+  NODE_OS := linux
+endif
+ifeq ($(UNAME_M),arm64)
+  NODE_ARCH := arm64
+else ifeq ($(UNAME_M),aarch64)
+  NODE_ARCH := arm64
+else
+  NODE_ARCH := x64
+endif
+
+export PATH := $(NODE_INSTALL_DIR)/bin:$(PATH)
 
 # Defaults to detecting what the current's node APT is, if cross-dist building:
 # or http://archive.ubuntu.com/ubuntu/ is a safe value.
@@ -154,8 +178,20 @@ check-migration:
 .env:
 	cp -u example-env .env
 
+.PHONY: install-node
+install-node:
+	@if [ -x "$(NODE_INSTALL_DIR)/bin/node" ]; then \
+		echo "Node.js already installed at $(NODE_INSTALL_DIR)"; \
+	else \
+		echo "Installing Node.js $(NODE_VERSION) for $(NODE_OS)-$(NODE_ARCH)..."; \
+		curl -LO https://nodejs.org/dist/$(NODE_VERSION)/node-$(NODE_VERSION)-$(NODE_OS)-$(NODE_ARCH).tar.xz && \
+		mkdir -p "$(NODE_INSTALL_DIR)" && \
+		tar -xf node-$(NODE_VERSION)-$(NODE_OS)-$(NODE_ARCH).tar.xz --strip-components=1 -C "$(NODE_INSTALL_DIR)" && \
+		rm -f node-$(NODE_VERSION)-$(NODE_OS)-$(NODE_ARCH).tar.xz; \
+	fi
+
 .PHONY: tator
-tator: .env api/main/version.py clean_schema
+tator: .env install-node api/main/version.py clean_schema
 	docker network inspect public >/dev/null 2>&1 || \
     docker network create public
 	@# Default to mbari registry for tator target if REGISTRY not explicitly set
@@ -167,14 +203,15 @@ tator: .env api/main/version.py clean_schema
 	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose run --rm migrate
 	GIT_VERSION=$(GIT_VERSION) REGISTRY=$(REGISTRY) docker compose up -d
 
-mbari: api/main/version.py clean_schema
-	REGISTRY=mbari $(MAKE) tator-image transcode-image postgis-image client-image ui-image svt-image
+mbari: install-node api/main/version.py clean_schema
+	REGISTRY=mbari $(MAKE) tator-image transcode-image postgis-image client-image ui-image svt-image fiftyone-sync-image
 	docker tag mbari/tator_online:$(GIT_VERSION) mbari/tator_online:latest
 	docker tag mbari/tator_transcode:$(GIT_VERSION) mbari/tator_transcode:latest
 	docker tag mbari/tator_postgis:$(GIT_VERSION) mbari/tator_postgis:latest
 	docker tag mbari/tator_ui:$(GIT_VERSION) mbari/tator_ui:latest
 	docker tag mbari/tator_client:$(GIT_VERSION) mbari/tator_client:latest
 	docker tag mbari/svt_transcoder:$(GIT_VERSION) mbari/svt_transcoder:latest
+	docker tag mbari/fiftyone_sync:$(GIT_VERSION) mbari/fiftyone_sync:latest
 	docker push mbari/tator_online:$(GIT_VERSION)
 	docker push mbari/tator_transcode:$(GIT_VERSION)
 	docker push mbari/tator_postgis:$(GIT_VERSION)
@@ -253,7 +290,15 @@ client-image: $(TATOR_PY_WHEEL_FILE) svt-image
 transcode-image:
 	DOCKER_BUILDKIT=1 docker build --platform linux/amd64,linux/arm64 --pull --network host -t $(REGISTRY)/tator_transcode:$(GIT_VERSION) -f containers/tator_transcode/Dockerfile containers/tator_transcode || exit 255
 
+.PHONY: fiftyone-sync-image
+fiftyone-sync-image:
+	DOCKER_BUILDKIT=1 docker build --platform linux/amd64,linux/arm64 --pull --network host -t $(REGISTRY)/fiftyone_sync:$(GIT_VERSION) -f containers/fiftyone-sync/Dockerfile . || exit 255
 
+.PHONY: fiftyone-sync
+fiftyone-sync: fiftyone-sync-image
+	GIT_VERSION=$(GIT_VERSION) docker compose up -d fiftyone-sync-mongo --wait
+	GIT_VERSION=$(GIT_VERSION) docker compose up -d fiftyone-sync-api
+ 
 ifeq ($(shell cat api/main/version.py), $(shell ./scripts/version.sh))
 .PHONY: api/main/version.py
 api/main/version.py:

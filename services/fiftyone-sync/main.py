@@ -28,6 +28,24 @@ from embedding_service import (
 from database_manager import get_database_entry
 from database_uri_config import DatabaseUriConfig, database_name_from_uri
 
+TATOR_INTERNAL_API_URL = os.environ.get("TATOR_INTERNAL_API_URL", "").strip().rstrip("/")
+
+def _resolve_api_url(api_url: str) -> str:
+    """Return the Docker-internal API URL when running inside a container.
+
+    The browser sends api_url=http://localhost:8080 which is unreachable from
+    inside a Docker container (localhost == the container itself).  When
+    TATOR_INTERNAL_API_URL is set, swap out the host so the tator SDK can
+    reach the Tator nginx service on the Docker network.
+    """
+    if not TATOR_INTERNAL_API_URL:
+        return api_url.rstrip("/")
+    from urllib.parse import urlparse
+    parsed = urlparse(api_url)
+    if parsed.hostname in ("localhost", "127.0.0.1"):
+        return TATOR_INTERNAL_API_URL
+    return api_url.rstrip("/")
+
 # Origins allowed for CORS (dashboard and applet iframes). When allow_credentials=True,
 # browsers require a specific origin; "*" is not valid.
 CORS_ORIGINS = [
@@ -106,8 +124,8 @@ async def get_embed(job_id: str) -> dict:
     return result
 
 
-@router.get("/embedding-projects")
-async def get_embedding_projects() -> dict:
+@router.get("/vss-embedding")
+async def get_vss_embedding() -> dict:
     """
     Proxy to embedding service GET /projects. Returns {"projects": ["name", ...]}.
     Uses FASTVSS_API_URL. Used by the launcher applet to show embedding service
@@ -141,7 +159,7 @@ async def get_embedding_projects() -> dict:
 # User enters their Tator API token in the applet and clicks "Test token"; sync controls enable after token is verified.
 # Optional tparams: version_id, database_name, project_name (vss_project for embedding status only).
 # database-info is called with project_id; send api_url and Authorization to resolve to config key (project name).
-# Embedding service status: server uses FASTVSS_API_URL; GET /embedding-projects shows availability.
+# Embedding service status: server uses FASTVSS_API_URL; GET /vss-embedding shows availability.
 # FiftyOne opens in a new window/tab (Open FiftyOne button); no iframe.
 LAUNCHER_TEMPLATE = r"""
 <!DOCTYPE html>
@@ -393,7 +411,7 @@ LAUNCHER_TEMPLATE = r"""
         var el = document.getElementById('embedding-status');
         if (!el) return;
         var base = syncServiceUrl || window.location.origin;
-        var url = base.replace(/\/$/, '') + '/embedding-projects';
+        var url = base.replace(/\/$/, '') + '/vss-embedding';
         fetch(url)
           .then(function(r) {
             if (!r.ok) throw new Error(r.status === 503 ? (r.statusText || 'Service unavailable') : (r.status + ' ' + r.statusText));
@@ -599,7 +617,7 @@ async def get_database_info(
     project_name: str | None = None
     try:
         import tator
-        api = tator.get_api(api_url.rstrip("/"), token)
+        api = tator.get_api(_resolve_api_url(api_url), token)
         proj = api.get_project(project_id)
         project_name = getattr(proj, "name", None) or str(project_id)
     except Exception as e:
@@ -621,7 +639,7 @@ async def render_launcher() -> HTMLResponse:
     Required tparams: project (Tator project ID). Optional: iframe_host (host for app URL), base_port (5151), project_name (vss_project for embedding status only).
     The applet uses GET /database-info?project_id=... to resolve port and database from DatabaseUriConfig.
     "Open FiftyOne" opens the app in a new window. For sync: set sync_service_url and api_url; the user enters their Tator API token in the applet and clicks "Test token" to enable Sync from Tator / Sync to Tator.
-    Embedding service status: server uses FASTVSS_API_URL; applet calls GET /embedding-projects to show availability and project registration.
+    Embedding service status: server uses FASTVSS_API_URL; applet calls GET /vss-embedding to show availability and project registration.
     """
     return HTMLResponse(LAUNCHER_TEMPLATE)
 
@@ -649,16 +667,34 @@ async def get_versions(
     to populate the version dropdown. Token must be sent via Authorization header
     (e.g. "Token <token>") and is not accepted in the URL.
     """
+    # #region agent log
+    _dlog("versions_entry", {"project_id": project_id, "api_url": api_url, "has_auth": authorization is not None, "auth_prefix": (authorization or "")[:10]}, hyp="A,C", loc="main.py:versions")
+    # #endregion
     import tator
 
     token = _token_from_authorization(authorization)
     if not token:
+        # #region agent log
+        _dlog("versions_no_token", {"authorization_raw": repr(authorization)[:80]}, hyp="C", loc="main.py:versions")
+        # #endregion
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-    host = api_url.rstrip("/")
+    host = _resolve_api_url(api_url)
+    # #region agent log
+    _dlog("versions_calling_tator", {"host": host, "original_api_url": api_url, "project_id": project_id}, hyp="A,D", loc="main.py:versions")
+    # #endregion
     try:
         api = tator.get_api(host, token)
+        # #region agent log
+        _dlog("versions_api_created", {"host": host}, hyp="A,D", loc="main.py:versions")
+        # #endregion
         version_list = api.get_version_list(project_id)
+        # #region agent log
+        _dlog("versions_success", {"count": len(version_list)}, hyp="A,D", loc="main.py:versions")
+        # #endregion
     except Exception as e:
+        # #region agent log
+        _dlog("versions_exception", {"error": str(e)[:200], "type": type(e).__name__}, hyp="A,D", loc="main.py:versions")
+        # #endregion
         raise HTTPException(status_code=401, detail=str(e)) from e
     return [{"id": v.id, "name": v.name, "number": v.number} for v in version_list]
  
@@ -684,7 +720,7 @@ async def sync(
     project_name: str | None = None
     try:
         import tator
-        api = tator.get_api(api_url.rstrip("/"), token)
+        api = tator.get_api(_resolve_api_url(api_url), token)
         proj = api.get_project(project_id)
         project_name = getattr(proj, "name", None) or str(project_id)
     except Exception as e:
@@ -693,7 +729,7 @@ async def sync(
         project_name = str(project_id)
     project_name = project_name.strip() 
     logger.info(f"project_id={project_id} project_name={project_name!r} -> port={port}")
-    api_url_clean = api_url.rstrip("/")
+    api_url_clean = _resolve_api_url(api_url)
     database_entry = get_database_entry(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
@@ -772,7 +808,7 @@ async def sync_to_tator(
     project_name = None
     try:
         import tator
-        api = tator.get_api(api_url.rstrip("/"), token)
+        api = tator.get_api(_resolve_api_url(api_url), token)
         proj = api.get_project(project_id)
         project_name = getattr(proj, "name", None) or str(project_id)
     except Exception as e:
@@ -784,7 +820,7 @@ async def sync_to_tator(
           project_id=project_id,
           version_id=version_id,
           port=port,
-          api_url=api_url.rstrip("/"),
+          api_url=_resolve_api_url(api_url),
           token=token,
           dataset_name=dataset_name,
           label_attr=label_attr,

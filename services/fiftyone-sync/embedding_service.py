@@ -32,7 +32,7 @@ def init_disk_cache() -> None:
 def is_embedding_service_available() -> bool:
     """
     Return True if the Fast-VSS embedding service is reachable (GET /projects).
-    Used by sync to skip embeddings when service is unavailable; same notion as GET /embedding-projects.
+    Used by sync to skip embeddings when service is unavailable; same notion as GET /vss-embedding.
     """
     if not FASTVSS_BASE_URL:
         return False
