@@ -32,6 +32,8 @@ token.txt
 .token
 package-lock.json
 
+kubectl
+
 # Dev files
 tags*
 Bento4-SDK-1-6-0-632.x86_64-unknown-linux/*
