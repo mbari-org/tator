@@ -1,0 +1,19 @@
+# Example: per-project MongoDB URI and FiftyOne app port mapping.
+# Set FIFTYONE_DATABASE_URI_CONFIG to this file path.
+#
+# Single MongoDB for project ObjectDetection:
+projects:
+  ObjectDetection:
+    databases:
+      - uri: "mongodb://localhost:27017"
+        port: 5151
+#
+# Multi-project example (optional second Mongo) with a reference to the VSS service to compute embeddings:
+#  ObjectDetection:
+#    vss_project: "testproject"
+#    vss_service: "http://localhost:8000"
+#    databases:
+#      - uri: "mongodb://localhost:27017"
+#        port: 5151
+#      - uri: "mongodb://localhost:27018"
+#        port: 5152

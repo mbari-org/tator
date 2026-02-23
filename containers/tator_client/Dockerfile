@@ -25,6 +25,7 @@ RUN ldconfig
 RUN python3 -m venv tator
 COPY containers/tator_client/requirements.txt requirements.txt
 RUN . tator/bin/activate && pip --no-cache-dir --timeout=1000 install --upgrade pip && pip --no-cache-dir --timeout=1000 install -r requirements.txt
+RUN . tator/bin/activate && python -m pip install setuptools
 RUN rm requirements.txt
 ENV PATH="/tator/bin:$PATH"
 

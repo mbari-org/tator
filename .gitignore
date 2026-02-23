@@ -1,3 +1,5 @@
+.venv/
+**/.venv/
 *__pycache__*
 main/migrations/*
 *.sqlite*
@@ -30,6 +32,8 @@ token.txt
 .token
 package-lock.json
 
+kubectl
+
 # Dev files
 tags*
 Bento4-SDK-1-6-0-632.x86_64-unknown-linux/*
@@ -40,6 +44,7 @@ h
 containers/tator_client_braw/Blackmagic_RAW_Linux_2.2.1.tar
 helm/tator/configs/*
 **/debug.log
+services/fiftyone-sync/.embedding_cache
 **/.pylint-venv
 .env
 test-results

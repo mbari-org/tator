@@ -6,3 +6,4 @@ pillow==10.3.0
 progressbar2==4.4.2
 rq==1.16.1
 ddtrace==2.7.4
+setuptools

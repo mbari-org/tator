@@ -50,3 +50,4 @@ ujson==5.9.0
 uritemplate==4.1.1
 werkzeug==3.0.6
 wheel==0.43.0
+setuptools

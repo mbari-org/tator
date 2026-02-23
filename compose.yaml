@@ -45,8 +45,11 @@ services:
       interval: 1s
       timeout: 3s
       retries: 30
+    ports:
+      - "6379:6379"  # publish so host processes (e.g. fiftyone-sync) can use REDIS_HOST=localhost
     networks:
       - private
+      - public
     entrypoint: redis-server --maxmemory 2048mb --maxmemory-policy allkeys-lru
 
   postgis:
@@ -74,7 +77,7 @@ services:
   ###################################################################
 
   gunicorn:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: gunicorn
     entrypoint: gunicorn --workers 3 --worker-connections 100 --worker-class=gthread --threads=10 --timeout 600 --reload -b :80 tator_online.wsgi
     depends_on:
@@ -131,7 +134,7 @@ services:
       - private
 
   db-worker:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: db-worker
     entrypoint: python3 /tator_online/main/worker.py db_jobs
     depends_on:
@@ -143,7 +146,7 @@ services:
       - private
 
   image-worker:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: image-worker
     entrypoint: python3 /tator_online/main/worker.py image_jobs
     depends_on:
@@ -219,7 +222,7 @@ services:
       "
 
   migrate:
-    image: ${REGISTRY}/tator_online:${GIT_VERSION}
+    image: ${REGISTRY}/tator_online:latest
     container_name: migrate
     depends_on:
       - gunicorn
@@ -236,6 +239,45 @@ services:
       python3 manage.py migrate;
       exit 0;
       "
+
+  ###################################################################
+  # FiftyOne sync service
+  ###################################################################
+
+  fiftyone-sync-mongo:
+    image: mongo:7
+    container_name: fiftyone-sync-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    command: --dbpath /data/db --port 27017 --bind_ip_all
+    restart: unless-stopped
+    networks:
+      - private
+
+  fiftyone-sync-api:
+    image: ${REGISTRY}/fiftyone_sync:${GIT_VERSION}
+    container_name: fiftyone-sync-api
+    env_file:
+      - ./.env
+    environment:
+      - FIFTYONE_DATABASE_URI_CONFIG=/app/fiftyone.yml
+      - FIFTYONE_DATABASE_URI=mongodb://fiftyone-sync-mongo:27017
+      - FASTVSS_API_URL=${FASTVSS_API_URL}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TATOR_INTERNAL_API_URL=http://gunicorn
+    ports:
+      - "8001:8001" 
+    depends_on:
+      - fiftyone-sync-mongo
+    restart: unless-stopped
+    volumes:
+      - ./compose/fiftyone.yml:/app/fiftyone.yml
+    networks:
+      - private
+      - public
 
   ###################################################################
   # Cron jobs
@@ -293,4 +335,7 @@ networks:
   private:
     external: false
 
+volumes:
+  mongodb_data:
+    driver: local
 
