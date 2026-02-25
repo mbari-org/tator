@@ -44,9 +44,7 @@ handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
-
-CHUNK_SIZE = 200
-
+ 
 
 def _stop_process_on_port(port: int) -> None:
     """
@@ -100,6 +98,7 @@ def _launch_app_embedded(dataset: fo.Dataset, port: int):
 
 
 LOCALIZATION_BATCH_SIZE = 5000
+MEDIA_ID_BATCH_SIZE = 200
 
 
 def _json_serial(obj: Any) -> Any:
@@ -230,39 +229,40 @@ def fetch_and_save_localizations(
     Returns path to the file (e.g. .../localizations.jsonl). Uses LOCALIZATION_BATCH_SIZE per batch.
     If media_ids is provided, only localizations for those media are fetched (required when syncing
     a subset of media; avoids empty results when project localizations are scoped to media).
+
+    Media IDs are batched into groups of MEDIA_ID_BATCH_SIZE to avoid 414 Request-URI Too Large
+    errors from nginx when the project has many media.
     """
     base_dir = _project_tmp_dir(project_id)
     out_path = os.path.join(base_dir, f"localizations_{port}.jsonl")
     logger.info(f"Localizations JSONL will be saved to: {out_path}")
     batch_size = LOCALIZATION_BATCH_SIZE
 
-    def _count_kwargs(use_version: bool) -> dict:
-        kwargs: dict = {}
-        if media_ids:
-            kwargs["media_id"] = media_ids
-        if use_version and version_id is not None:
-            kwargs["version"] = [version_id]
-        return kwargs
+    media_id_batches: list[list[int] | None] = (
+        [media_ids[i:i + MEDIA_ID_BATCH_SIZE] for i in range(0, len(media_ids), MEDIA_ID_BATCH_SIZE)]
+        if media_ids else [None]
+    )
+    logger.info(f"Media ID batches: {len(media_id_batches)} batch(es) of up to {MEDIA_ID_BATCH_SIZE}")
 
-    def _list_kwargs(after: int | None, use_version: bool) -> dict:
-        kwargs: dict = {"stop": batch_size}
-        if media_ids:
-            kwargs["media_id"] = media_ids
-        if use_version and version_id is not None:
-            kwargs["version"] = [version_id]
-        if after is not None:
-            kwargs["after"] = after
-        return kwargs
+    def _version_kw(use_ver: bool) -> dict:
+        return {"version": [version_id]} if use_ver and version_id is not None else {}
 
     use_version = True
     try:
-        count_kwargs = _count_kwargs(use_version=True)
-        loc_count = api.get_localization_count(project_id, **count_kwargs)
+        loc_count = 0
+        for mid_batch in media_id_batches:
+            kw = _version_kw(True)
+            if mid_batch:
+                kw["media_id"] = mid_batch
+            loc_count += api.get_localization_count(project_id, **kw)
         logger.info(f"get_localization_count(project_id={project_id}, media_ids={bool(media_ids)}, version={version_id}) = {loc_count}")
         if loc_count == 0 and version_id is not None:
-            # Fallback: requested version may have no localizations; try without version filter
-            count_kwargs_no_ver = _count_kwargs(use_version=False)
-            count_no_ver = api.get_localization_count(project_id, **count_kwargs_no_ver)
+            count_no_ver = 0
+            for mid_batch in media_id_batches:
+                kw: dict = {}
+                if mid_batch:
+                    kw["media_id"] = mid_batch
+                count_no_ver += api.get_localization_count(project_id, **kw)
             if count_no_ver > 0:
                 logger.info(f"Version {version_id} has 0 localizations; falling back to all versions (count={count_no_ver})")
                 use_version = False
@@ -271,38 +271,51 @@ def fetch_and_save_localizations(
         logger.exception(f"get_localization_count failed (will still try list): {e}")
 
     total = 0
-    after_id = None
     with open(out_path, "w") as f:
-        while True:
-            kwargs = _list_kwargs(after_id, use_version)
-            logger.info(f"get_localization_list(project_id={project_id}, {kwargs})")
-            try:
-                batch = api.get_localization_list(project_id, **kwargs)
-            except Exception as e:
-                logger.info(f"get_localization_list failed: {e}")
-                logger.info("get_localization_list failed")
-                break
-            if not batch:
-                if total == 0 and version_id is not None and use_version:
-                    # First batch empty with version filter; retry without version
-                    logger.info(f"First batch empty with version={version_id}; retrying without version filter")
-                    use_version = False
-                    after_id = None
-                    continue
-                logger.info(f"Localizations batch empty (after={after_id}), done")
-                break
-            for loc in batch:
-                try:
-                    obj = loc.to_dict() if hasattr(loc, "to_dict") else loc
-                    f.write(json.dumps(obj, default=_json_serial) + "\n")
-                except Exception as e:
-                    logger.info(f"Skip localization serialization: {e}")
-                    continue
-            total += len(batch)
-            after_id = batch[-1].id if batch else None
-            logger.info(f"Localizations batch: count={len(batch)} total_so_far={total} last_id={after_id}")
-            if len(batch) < batch_size:
-                break
+        def _fetch_all_locs(use_ver: bool) -> int:
+            """Fetch localizations across all media_id batches, paginating each. Returns count."""
+            fetched = 0
+            for bidx, mid_batch in enumerate(media_id_batches):
+                after_id = None
+                while True:
+                    kw = {"stop": batch_size}
+                    if mid_batch:
+                        kw["media_id"] = mid_batch
+                    kw.update(_version_kw(use_ver))
+                    if after_id is not None:
+                        kw["after"] = after_id
+                    logger.info(
+                        f"get_localization_list(project={project_id}, "
+                        f"media_batch={bidx + 1}/{len(media_id_batches)}, {kw})"
+                    )
+                    try:
+                        locs = api.get_localization_list(project_id, **kw)
+                    except Exception as e:
+                        logger.info(f"get_localization_list failed: {e}")
+                        return fetched
+                    if not locs:
+                        logger.info(f"Localizations batch empty (media_batch={bidx + 1}, after={after_id}), moving on")
+                        break
+                    for loc in locs:
+                        try:
+                            obj = loc.to_dict() if hasattr(loc, "to_dict") else loc
+                            f.write(json.dumps(obj, default=_json_serial) + "\n")
+                        except Exception as e:
+                            logger.info(f"Skip localization serialization: {e}")
+                    fetched += len(locs)
+                    after_id = locs[-1].id if locs else None
+                    logger.info(f"Localizations batch: count={len(locs)} total_so_far={fetched} last_id={after_id}")
+                    if len(locs) < batch_size:
+                        break
+            return fetched
+
+        total = _fetch_all_locs(use_version)
+        if total == 0 and version_id is not None and use_version:
+            logger.info(f"No localizations with version={version_id}; retrying without version filter")
+            f.seek(0)
+            f.truncate()
+            total = _fetch_all_locs(False)
+
     logger.info(f"Fetched {total} localizations -> {out_path}")
     return out_path
 
