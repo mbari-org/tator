@@ -11,11 +11,14 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, File, Form, Header, HTTPException, Query, UploadFile
+import time
+
+from fastapi import APIRouter, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, Response
 from pydantic import BaseModel
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 import httpx
 
@@ -58,6 +61,17 @@ _cors_origins_env = os.environ.get("FIFTYONE_SYNC_CORS_ORIGINS", "").strip()
 if _cors_origins_env:
     CORS_ORIGINS.extend(origin.strip() for origin in _cors_origins_env.split(",") if origin.strip())
 
+REQUEST_COUNT = Counter(
+    "http_requests_total",
+    "Total HTTP requests",
+    ["method", "endpoint", "status"],
+)
+REQUEST_LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request latency in seconds",
+    ["method", "endpoint"],
+)
+
 app = FastAPI(
     title="FiftyOne Sync Service",
     description="Embedding API and FiftyOne launcher for Tator dashboards",
@@ -71,6 +85,20 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def prometheus_middleware(request: Request, call_next):
+    if request.url.path in ("/metrics", "/voxel51/metrics"):
+        return await call_next(request)
+    method = request.method
+    endpoint = request.url.path
+    start = time.monotonic()
+    response = await call_next(request)
+    elapsed = time.monotonic() - start
+    REQUEST_LATENCY.labels(method=method, endpoint=endpoint).observe(elapsed)
+    REQUEST_COUNT.labels(method=method, endpoint=endpoint, status=response.status_code).inc()
+    return response
 
 router = APIRouter(tags=["embedding"])
 app_launch = APIRouter(tags=["launcher"])
@@ -819,6 +847,13 @@ async def sync_to_tator(
       return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
+
+
+@app.get("/metrics")
+@app.get("/voxel51/metrics")
+async def metrics() -> Response:
+    """Prometheus metrics endpoint."""
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.get("/health")

@@ -244,15 +244,65 @@ services:
   # FiftyOne sync service
   ###################################################################
 
-  fiftyone-sync-mongo:
+  mongo-cfe-deployments:
     image: mongo:7
-    container_name: fiftyone-sync-mongo
-    ports:
-      - "27017:27017"
+    container_name: mongo-cfe-deployments
+    restart: always
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_CFE_DEPLOYMENTS_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_CFE_DEPLOYMENTS_PASSWORD}
+    healthcheck:
+      test: ["CMD", "mongosh", "-u", "${MONGO_CFE_DEPLOYMENTS_USER}", "-p", "${MONGO_CFE_DEPLOYMENTS_PASSWORD}", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     volumes:
-      - mongodb_data:/data/db
-    command: --dbpath /data/db --port 27017 --bind_ip_all
-    restart: unless-stopped
+      - mongo_cfe_deployments_data:/data/db
+    networks:
+      - private
+
+  mongo-biodiversity:
+    image: mongo:7
+    container_name: mongo-biodiversity
+    restart: always
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mongo_biodiversity_data:/data/db
+    networks:
+      - private
+
+  mongo-cfe:
+    image: mongo:7
+    container_name: mongo-cfe
+    restart: always
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=${MONGO_CFE_USER}
+      - MONGO_INITDB_ROOT_PASSWORD=${MONGO_CFE_PASSWORD}
+    healthcheck:
+      test: ["CMD", "mongosh", "-u", "${MONGO_CFE_USER}", "-p", "${MONGO_CFE_PASSWORD}", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mongo_cfe_data:/data/db
+    networks:
+      - private
+
+  mongo-planktivore:
+    image: mongo:7
+    container_name: mongo-planktivore
+    restart: always
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - mongo_planktivore_data:/data/db
     networks:
       - private
 
@@ -263,18 +313,24 @@ services:
       - ./.env
     environment:
       - FIFTYONE_DATABASE_URI_CONFIG=/app/fiftyone.yml
-      - FIFTYONE_DATABASE_URI=mongodb://fiftyone-sync-mongo:27017
+      - FIFTYONE_DATABASE_URI=mongodb://${MONGO_CFE_DEPLOYMENTS_USER}:${MONGO_CFE_DEPLOYMENTS_PASSWORD}@mongo-cfe-deployments:27017
       - FASTVSS_API_URL=${FASTVSS_API_URL}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - TATOR_INTERNAL_API_URL=http://gunicorn
     ports:
-      - "8001:8001" 
+      - "8001:8001"
     depends_on:
-      - fiftyone-sync-mongo
-    restart: unless-stopped
+      - mongo-cfe-deployments
+      - mongo-biodiversity
+      - mongo-cfe
+      - mongo-planktivore
+      - redis
+    restart: always
     volumes:
       - ./compose/fiftyone.yml:/app/fiftyone.yml
+      - ./services/fiftyone-sync:/app
+      - ./.cursor:/debug
     networks:
       - private
       - public
@@ -336,6 +392,12 @@ networks:
     external: false
 
 volumes:
-  mongodb_data:
+  mongo_cfe_deployments_data:
+    driver: local
+  mongo_biodiversity_data:
+    driver: local
+  mongo_cfe_data:
+    driver: local
+  mongo_planktivore_data:
     driver: local
 

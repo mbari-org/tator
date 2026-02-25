@@ -34,5 +34,8 @@ PyYAML>=6.0
 redis>=5.0.0
 rq>=1.15.0
 
+# Prometheus metrics
+prometheus_client>=0.20.0
+
 # Optional: for config.embeddings UMAP visualization only (embeddings come from embed service)
 umap-learn>=0.5

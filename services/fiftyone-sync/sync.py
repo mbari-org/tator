@@ -45,6 +45,27 @@ formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(messag
 handler.setFormatter(formatter)
 logger.addHandler(handler)
  
+MEDIA_ID_BATCH_SIZE = 200
+
+
+def _test_mongodb_connection(database_uri: str, timeout_ms: int = 5000) -> None:
+    """Verify MongoDB is reachable before doing expensive Tator API work.
+
+    Raises ConnectionError if the server cannot be reached within *timeout_ms*.
+    """
+    from pymongo import MongoClient
+    from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+
+    client = MongoClient(database_uri, serverSelectionTimeoutMS=timeout_ms)
+    try:
+        client.admin.command("ping")
+    except (ConnectionFailure, ServerSelectionTimeoutError) as exc:
+        raise ConnectionError(
+            f"Cannot connect to MongoDB at {database_uri}: {exc}"
+        ) from exc
+    finally:
+        client.close()
+
 
 def _stop_process_on_port(port: int) -> None:
     """
@@ -141,16 +162,16 @@ def fetch_project_media_ids(
 
 def get_media_chunked(api: Any, project_id: int, media_ids: list[int]) -> list[Any]:
     """
-    Get media objects in chunks of CHUNK_SIZE. Uses get_media_list_by_id for reliable Media objects.
+    Get media objects in chunks of MEDIA_ID_BATCH_SIZE. Uses get_media_list_by_id for reliable Media objects.
     Filters out non-Media responses (API quirk). Returns list of tator.models.Media.
     """
-    logger.info(f"get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={CHUNK_SIZE}")
+    logger.info(f"get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={MEDIA_ID_BATCH_SIZE}")
     if not media_ids:
         logger.info("get_media_chunked: no ids, returning []")
         return []
     all_media = []
-    for start in range(0, len(media_ids), CHUNK_SIZE):
-        chunk_ids = media_ids[start : start + CHUNK_SIZE]
+    for start in range(0, len(media_ids), MEDIA_ID_BATCH_SIZE):
+        chunk_ids = media_ids[start : start + MEDIA_ID_BATCH_SIZE]
         media = api.get_media_list_by_id(project_id, {"ids": chunk_ids})
         new_media = [m for m in media if isinstance(m, tator.models.Media)]
         all_media += new_media
@@ -1076,6 +1097,8 @@ def sync_edits_to_tator(
     os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
     os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
+    _test_mongodb_connection(fo.config.database_uri)
+
     host = api_url.rstrip("/")
     api = tator.get_api(host, token)
     ds_name = dataset_name or _default_dataset_name(api, project_id, version_id)
@@ -1229,6 +1252,17 @@ def sync_project_to_fiftyone(
     fo.config.database_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
     fo.config.database_name = resolved_db
     logger.info(f"database_uri={fo.config.database_uri} database_name={resolved_db}")
+
+    try:
+        _test_mongodb_connection(fo.config.database_uri)
+        logger.info("MongoDB connection OK")
+    except ConnectionError as exc:
+        logger.error(f"MongoDB pre-flight check failed: {exc}")
+        return {
+            "status": "error",
+            "message": str(exc),
+            "database_name": resolved_db,
+        }
 
     lock_key = get_sync_lock_key(resolved_db, project_id, version_id)
     if not try_acquire_sync_lock(lock_key):
