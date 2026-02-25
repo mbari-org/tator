@@ -717,19 +717,22 @@ async def sync(
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
 
     if is_queue_available():
-        job_id = enqueue_sync(
-            project_id=project_id,
-            version_id=version_id,
-            api_url=api_url_clean,
-            token=token,
-            port=database_entry.port,
-            project_name=project_name,
-            database_name=database_name_from_uri(database_entry.uri),
-            config_path=config_path,
-            launch_app=launch_app,
-        )
-        return {"job_id": job_id, "status": "queued", "port": port}
-    # No Redis: run inline (blocking; may be slow for large projects)
+        try:
+            job_id = enqueue_sync(
+                project_id=project_id,
+                version_id=version_id,
+                api_url=api_url_clean,
+                token=token,
+                port=database_entry.port,
+                project_name=project_name,
+                database_name=database_name_from_uri(database_entry.uri),
+                config_path=config_path,
+                launch_app=launch_app,
+            )
+            return {"job_id": job_id, "status": "queued", "port": port}
+        except Exception as e:
+            logger.warning(f"Redis unavailable, falling back to inline sync: {e}")
+    # No Redis (or Redis unreachable): run inline (blocking; may be slow for large projects)
     from sync import sync_project_to_fiftyone
     try:
       result = sync_project_to_fiftyone(
@@ -767,7 +770,10 @@ async def sync_status(job_id: str) -> dict:
 
     if not is_queue_available():
         raise HTTPException(status_code=503, detail="Redis not configured; no job queue")
-    return get_job_status(job_id)
+    try:
+        return get_job_status(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}") from e
 
 
 @app_launch.post("/sync-to-tator")
