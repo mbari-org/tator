@@ -667,34 +667,16 @@ async def get_versions(
     to populate the version dropdown. Token must be sent via Authorization header
     (e.g. "Token <token>") and is not accepted in the URL.
     """
-    # #region agent log
-    _dlog("versions_entry", {"project_id": project_id, "api_url": api_url, "has_auth": authorization is not None, "auth_prefix": (authorization or "")[:10]}, hyp="A,C", loc="main.py:versions")
-    # #endregion
     import tator
 
     token = _token_from_authorization(authorization)
     if not token:
-        # #region agent log
-        _dlog("versions_no_token", {"authorization_raw": repr(authorization)[:80]}, hyp="C", loc="main.py:versions")
-        # #endregion
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
     host = _resolve_api_url(api_url)
-    # #region agent log
-    _dlog("versions_calling_tator", {"host": host, "original_api_url": api_url, "project_id": project_id}, hyp="A,D", loc="main.py:versions")
-    # #endregion
     try:
         api = tator.get_api(host, token)
-        # #region agent log
-        _dlog("versions_api_created", {"host": host}, hyp="A,D", loc="main.py:versions")
-        # #endregion
         version_list = api.get_version_list(project_id)
-        # #region agent log
-        _dlog("versions_success", {"count": len(version_list)}, hyp="A,D", loc="main.py:versions")
-        # #endregion
     except Exception as e:
-        # #region agent log
-        _dlog("versions_exception", {"error": str(e)[:200], "type": type(e).__name__}, hyp="A,D", loc="main.py:versions")
-        # #endregion
         raise HTTPException(status_code=401, detail=str(e)) from e
     return [{"id": v.id, "name": v.name, "number": v.number} for v in version_list]
  
