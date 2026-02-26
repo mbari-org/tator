@@ -505,8 +505,8 @@ LAUNCHER_TEMPLATE = r"""
                       }
                       if (s.status === 'finished' && s.result) {
                         var res = s.result;
-                        if (res.status === 'busy') {
-                          syncStatus.textContent = res.message || 'Dataset is being updated. Please try again in a few minutes.';
+                        if (res.status === 'busy' || res.status === 'error') {
+                          syncStatus.textContent = res.message || 'Sync failed. Please try again in a few minutes.';
                           syncStatus.classList.add('error');
                           syncBtn.disabled = false;
                           return;
@@ -781,6 +781,11 @@ async def sync(
                   "message",
                   "This dataset is being updated by another sync. Please try again in a few minutes.",
               ),
+          )
+      if result.get("status") == "error":
+          raise HTTPException(
+              status_code=503,
+              detail=result.get("message", "Sync failed"),
           )
       result["port"] = port
       return result
