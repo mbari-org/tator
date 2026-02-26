@@ -1258,11 +1258,7 @@ def sync_project_to_fiftyone(
         logger.info("MongoDB connection OK")
     except ConnectionError as exc:
         logger.error(f"MongoDB pre-flight check failed: {exc}")
-        return {
-            "status": "error",
-            "message": str(exc),
-            "database_name": resolved_db,
-        }
+        raise RuntimeError(f"MongoDB pre-flight check failed: {exc}") from exc
 
     lock_key = get_sync_lock_key(resolved_db, project_id, version_id)
     if not try_acquire_sync_lock(lock_key):

@@ -111,5 +111,7 @@ def get_job_status(job_id: str) -> dict[str, Any]:
     if status == "finished" and job.result is not None:
         out["result"] = job.result
     if status == "failed" and job.exc_info:
-        out["error"] = job.exc_info
+        exc_text = job.exc_info
+        lines = [l.strip() for l in exc_text.strip().splitlines() if l.strip()]
+        out["error"] = lines[-1] if lines else exc_text
     return out
