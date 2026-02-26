@@ -209,16 +209,19 @@ def save_media_to_tmp(
         valid = [m for m in valid if m.id in media_ids_filter]
     total = len(valid)
     logger.info(f"Saving {total} media files to {out_dir}")
+    downloaded = 0
+    skipped = 0
+    failed = 0
+    log_interval = max(1, total // 10)
     for idx, m in enumerate(valid, 1):
         safe_name = f"{m.id}_{m.name}"
         out_path = os.path.join(out_dir, safe_name)
         if _is_video_name(m.name):
-            logger.info(f"Skipping video (not supported): {safe_name}")
+            skipped += 1
             continue
         if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
-            logger.info(f"Skipping existing: {safe_name}")
+            skipped += 1
             continue
-        logger.info(f"Downloading {m.name} to {out_path}")
         num_tries = 0
         success = False
         while num_tries < 3 and not success:
@@ -226,13 +229,16 @@ def save_media_to_tmp(
                 for _ in tator.util.download_media(api, m, out_path):
                     pass
                 success = True
-                logger.info(f"Saved {m.id} -> {out_path}")
+                downloaded += 1
             except Exception as e:
-                logger.info(f"Download attempt {num_tries + 1}/3 failed for {m.id}: {e}")
+                logger.debug(f"Download attempt {num_tries + 1}/3 failed for {m.id}: {e}")
                 num_tries += 1
         if not success:
-            logger.info(f"Could not download {m.name} after 3 tries")
-    logger.info(f"Saved media files to {out_dir}")
+            failed += 1
+            logger.warning(f"Could not download {m.name} after 3 tries")
+        if idx % log_interval == 0 or idx == total:
+            logger.info(f"Download progress: {idx}/{total} processed ({downloaded} saved, {skipped} skipped, {failed} failed)")
+    logger.info(f"Download complete: {downloaded} saved, {skipped} skipped, {failed} failed -> {out_dir}")
     return out_dir
 
 
@@ -468,7 +474,7 @@ def crop_localizations_parallel(
         logger.info("No localization crops to process")
         return (0, 0)
     logger.info(f"Cropping {len(tasks)} localizations in parallel (size={size}x{size})")
-    workers = max_workers or min(32, (os.cpu_count() or 4) * 2)
+    workers = max_workers or min(128, (os.cpu_count() or 4) * 2)
     num_ok = 0
     num_fail = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
