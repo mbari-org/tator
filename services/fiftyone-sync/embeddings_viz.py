@@ -61,34 +61,29 @@ def _compute_embeddings_via_service(
     if not samples:
         return
 
-    # Collect image bytes for all samples (filepath -> image bytes)
-    filepaths = []
-    bytes_list = []
-    for s in samples:
-        fp = s["filepath"]
-        if not os.path.isfile(fp):
-            logger.warning(f"Skipping missing file: {fp}")
-            continue
-        with open(fp, "rb") as f:
-            data = f.read()
-        filepaths.append(fp)
-        bytes_list.append(data)
+    filepaths = [s["filepath"] for s in samples if os.path.isfile(s["filepath"])]
+    skipped = len(samples) - len(filepaths)
+    if skipped:
+        logger.warning(f"Skipping {skipped} missing file(s)")
 
-    if not bytes_list:
+    if not filepaths:
         logger.warning("No valid image files to embed")
         return
 
     # Submit all batches, then poll all jobs
-    num_batches = (len(bytes_list) + batch_size - 1) // batch_size
+    num_batches = (len(filepaths) + batch_size - 1) // batch_size
     jobs: list[tuple[int, str]] = []  # (batch_index, job_id)
 
     with httpx.Client(timeout=5.0) as client:
         # Phase 1: submit every batch and collect job IDs
-        for start in range(0, len(bytes_list), batch_size):
+        for start in range(0, len(filepaths), batch_size):
             batch_idx = start // batch_size
             logger.info(f"Submitting batch {batch_idx + 1}/{num_batches}")
-            batch = bytes_list[start : start + batch_size]
-            files = [("files", (f"img_{i}.jpg", data)) for i, data in enumerate(batch)]
+            batch_paths = filepaths[start : start + batch_size]
+            files = []
+            for i, fp in enumerate(batch_paths):
+                with open(fp, "rb") as f:
+                    files.append(("files", (f"img_{i}.jpg", f.read())))
             url = f"{base}/embed/{project_name}"
             resp = client.post(url, files=files)
             resp.raise_for_status()
