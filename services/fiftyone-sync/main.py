@@ -220,6 +220,7 @@ LAUNCHER_TEMPLATE = r"""
     .applet-header td { padding: 0.25rem 0; vertical-align: middle; }
     .applet-header tr + tr th { padding-top: 0.75rem; }
     .applet-header .cell-controls { display: flex; align-items: center; gap: 0.5rem 1rem; flex-wrap: wrap; }
+    .applet-header .force-sync-option { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #b0b0b0; cursor: pointer; }
   </style>
 </head>
 <body>
@@ -265,6 +266,9 @@ LAUNCHER_TEMPLATE = r"""
           <td>
             <div class="cell-controls">
               <button type="button" id="sync-from-tator-btn" disabled title="Loads the selected version and launches a Voxel51 (FiftyOne) viewer in another tab. If the Embedding Service is not available, the viewer will still launch but will not contain embeddings."><span class="btn-icon" aria-hidden="true">←</span>Load from Tator</button>
+              <label class="force-sync-option" title="Re-fetch media and localizations from Tator instead of using cached data when available.">
+                <input type="checkbox" id="force-sync-checkbox" name="force_sync" value="1"> Force sync
+              </label>
               <button type="button" id="sync-to-tator-btn" disabled title="Pushes any revised data from FiftyOne back to the selected version.">Sync to Tator<span class="btn-icon end" aria-hidden="true">→</span></button>
               <span id="sync-status" class="sync-status" aria-live="polite"></span>
               <a id="fiftyone-app-link" href="#" target="_blank" rel="noopener" class="fiftyone-app-link" style="display: none;">Open FiftyOne viewer</a>
@@ -479,6 +483,8 @@ LAUNCHER_TEMPLATE = r"""
           if (fiftyoneAppLink) fiftyoneAppLink.style.display = 'none';
           var params = new URLSearchParams({ project_id: String(project), api_url: apiUrl, token: token, launch_app: 'true', port: port });
           if (v) params.set('version_id', v);
+          var forceSyncEl = document.getElementById('force-sync-checkbox');
+          if (forceSyncEl && forceSyncEl.checked) params.set('force_sync', 'true');
           var fullSyncUrl = syncServiceUrl + '/sync?' + params.toString();
           fetch(fullSyncUrl, { method: 'POST' })
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
@@ -726,6 +732,7 @@ async def sync(
     port: int = Query(..., description="Port for this project"),
     config_path: str | None = Query(None, description="Path to YAML/JSON config file for dataset build"),
     launch_app: bool = Query(True, description="Launch FiftyOne app after sync"),
+    force_sync: bool = Query(False, description="Force full sync; bypass cached JSONL and re-fetch media/localizations"),
 ) -> dict:
     """
     Trigger sync: fetch Tator media + localizations, build FiftyOne dataset, launch App.
@@ -764,6 +771,7 @@ async def sync(
                 database_name=database_name_from_uri(database_entry.uri),
                 config_path=config_path,
                 launch_app=launch_app,
+                force_sync=force_sync,
             )
             return {"job_id": job_id, "status": "queued", "port": port}
         except Exception as e:
@@ -781,6 +789,7 @@ async def sync(
           database_name=database_name_from_uri(database_entry.uri),
           config_path=config_path,
           launch_app=launch_app,
+          force_sync=force_sync,
       )
       if result.get("status") == "busy":
           raise HTTPException(

@@ -151,6 +151,78 @@ def _localizations_jsonl_path(project_id: int, version_id: int | None) -> str:
     return os.path.join(_data_dir(project_id, version_id), "localizations.jsonl")
 
 
+def _file_newer_than_days(filepath: str, days: float = 1.0) -> bool:
+    """True if file exists and was modified within the last *days* days."""
+    if not filepath or not os.path.isfile(filepath):
+        return False
+    try:
+        mtime = os.path.getmtime(filepath)
+        return (time.time() - mtime) <= (days * 24 * 3600)
+    except OSError:
+        return False
+
+
+def _localizations_jsonl_line_count_and_media_ids(path: str) -> tuple[int, list[int]]:
+    """
+    Stream JSONL and return (line count, distinct media IDs from "media" field).
+    Returns (0, []) if file is missing or unreadable.
+    """
+    if not path or not os.path.isfile(path):
+        return (0, [])
+    line_count = 0
+    media_ids: set[int] = set()
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                line_count += 1
+                try:
+                    obj = json.loads(line)
+                    mid = obj.get("media")
+                    if mid is not None:
+                        media_ids.add(int(mid))
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+    except OSError:
+        return (0, [])
+    return (line_count, sorted(media_ids))
+
+
+def _get_localization_count_from_api(
+    api: Any,
+    project_id: int,
+    version_id: int | None,
+    media_ids: list[int] | None,
+    media_id_batch_size: int,
+) -> int | None:
+    """
+    Return total localization count from Tator API (same batching as fetch_and_save_localizations).
+    Returns None on error.
+    """
+    mid_batch = media_id_batch_size
+    media_id_batches: list[list[int] | None] = (
+        [media_ids[i : i + mid_batch] for i in range(0, len(media_ids or []), mid_batch)]
+        if media_ids else [None]
+    )
+
+    def _version_kw() -> dict:
+        return {"version": [version_id]} if version_id is not None else {}
+
+    try:
+        loc_count = 0
+        for batch in media_id_batches:
+            kw = _version_kw()
+            if batch:
+                kw["media_id"] = batch
+            loc_count += api.get_localization_count(project_id, **kw)
+        return loc_count
+    except Exception as e:
+        logger.debug(f"_get_localization_count_from_api failed: {e}")
+        return None
+
+
 def fetch_project_media_ids(
     api_url: str,
     token: str,
@@ -867,7 +939,7 @@ def reconcile_dataset_with_tator(
 
     # 1. Remove samples deleted in Tator (only when we have a non-empty localization set from Tator)
     # If Tator returns 0 localizations (e.g. wrong version or API filter), do not remove existing samples
-    logger.info("Reconcile: Remove samples deleted in Tator (only when we have a non-empty localization set from Tator)")
+    logger.info("Reconcile: Remove samples deleted in Tator")
     if tator_eids:
         to_remove = []
         for s in dataset:
@@ -881,7 +953,7 @@ def reconcile_dataset_with_tator(
         logger.info(f"Reconcile: 0 localizations from Tator; skipping delete step (keeping existing samples)")
 
     # 2. Update samples with changed box (crop already overwritten by crop_localizations_parallel)
-    logger.info("Reconcile: Update samples with changed box (crop already overwritten by crop_localizations_parallel)")
+    logger.info("Reconcile: Update samples with changed box")
     updated = 0
     for sample in dataset.iter_samples(autosave=False):
         elemental_id = sample["elemental_id"] if "elemental_id" in sample else None
@@ -1246,6 +1318,7 @@ def run_sync_job(
     database_name: str | None = None,
     config_path: str | None = None,
     launch_app: bool = True,
+    force_sync: bool = False,
 ) -> dict[str, Any]:
     """
     Entrypoint for RQ worker: all args are serializable. Calls sync_project_to_fiftyone.
@@ -1263,6 +1336,7 @@ def run_sync_job(
         database_name=database_name,
         config_path=config_path,
         launch_app=launch_app,
+        force_sync=force_sync,
     )
 
 
@@ -1277,6 +1351,7 @@ def sync_project_to_fiftyone(
     database_name: str | None = None,
     config_path: str | None = None,
     launch_app: bool = True,
+    force_sync: bool = False,
 ) -> dict[str, Any]:
     """
     Fetch Tator media and localizations, build FiftyOne dataset, launch App on given port.
@@ -1327,20 +1402,41 @@ def sync_project_to_fiftyone(
             host = api_url.rstrip("/")
             api = tator.get_api(host, token)
 
-            # 1. Fetch media IDs (lightweight metadata, needed for localization query)
-            logger.info(f"Fetching media IDs... host={host} project_id={project_id} api_url={api_url}")
-            media_ids_list = fetch_project_media_ids(api_url, token, project_id)
+            # Bypass: skip expensive media + localization fetch when JSONL is fresh and count matches (unless force_sync)
+            jsonl_path = _localizations_jsonl_path(project_id, version_id)
+            use_cached_jsonl = False
+            if not force_sync and _file_newer_than_days(jsonl_path, days=1.0):
+                line_count, media_ids_from_jsonl = _localizations_jsonl_line_count_and_media_ids(jsonl_path)
+                api_count = _get_localization_count_from_api(
+                    api, project_id, version_id,
+                    media_ids_from_jsonl or None,
+                    media_id_batch_size,
+                )
+                if api_count is not None and line_count == api_count:
+                    use_cached_jsonl = True
+                    localizations_path = jsonl_path
+                    media_ids_list = media_ids_from_jsonl
+                    logger.info(
+                        f"Bypassing media and localization fetch: JSONL is newer than 1 day and "
+                        f"line count ({line_count}) matches get_localization_count"
+                    )
 
-            # 2. Fetch localizations first (cheap metadata)
-            logger.info("Fetching localizations...")
-            localizations_path = fetch_and_save_localizations(
-                api,
-                project_id,
-                version_id=version_id,
-                media_ids=media_ids_list or None,
-                localization_batch_size=localization_batch_size,
-                media_id_batch_size=media_id_batch_size,
-            )
+            if not use_cached_jsonl:
+                # 1. Fetch media IDs (lightweight metadata, needed for localization query)
+                logger.info(f"Fetching media IDs... host={host} project_id={project_id} api_url={api_url}")
+                media_ids_list = fetch_project_media_ids(api_url, token, project_id)
+
+                # 2. Fetch localizations first (cheap metadata)
+                logger.info("Fetching localizations...")
+                localizations_path = fetch_and_save_localizations(
+                    api,
+                    project_id,
+                    version_id=version_id,
+                    media_ids=media_ids_list or None,
+                    localization_batch_size=localization_batch_size,
+                    media_id_batch_size=media_id_batch_size,
+                )
+
             if localizations_path:
                 logger.info(f"saved_localizations_path (JSONL): {localizations_path}")
 
@@ -1476,9 +1572,16 @@ def sync_project_to_fiftyone(
             }
             try:
                 from embedding_service import is_embedding_service_available
-                from embeddings_viz import compute_embeddings_and_viz
+                from embeddings_viz import compute_embeddings_and_viz, has_embeddings
 
-                if not is_embedding_service_available():
+                embeddings_field = model_info["embeddings_field"]
+                # When bypass was used (cached JSONL), skip embedding computation if embeddings already exist in MongoDB
+                if use_cached_jsonl and has_embeddings(dataset, embeddings_field):
+                    logger.info(
+                        f"Bypass used and embeddings already exist in dataset '{embeddings_field}'; "
+                        "skipping embedding computation"
+                    )
+                elif not is_embedding_service_available():
                     logger.info(
                         "Embedding service unavailable; skipping embeddings/UMAP (dataset still available)"
                     )

@@ -64,6 +64,7 @@ def enqueue_sync(
     database_name: str | None = None,
     config_path: str | None = None,
     launch_app: bool = True,
+    force_sync: bool = False,
 ) -> str:
     """
     Enqueue a sync job. Returns RQ job id.
@@ -86,6 +87,7 @@ def enqueue_sync(
         database_name=database_name,
         config_path=config_path,
         launch_app=launch_app,
+        force_sync=force_sync,
         job_timeout=3600 * 24,  # 24h for large projects
         result_ttl=3600 * 24,
         failure_ttl=3600,
