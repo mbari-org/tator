@@ -50,11 +50,7 @@ def _load_config() -> dict[tuple[str, int], DatabaseEntry] | None:
     try:
         _config = {}
         _yaml_config = DatabaseUriConfig.from_yaml_path(path)
-        logger.info(
-            "loaded config from %s: projects=%s",
-            path,
-            list(_yaml_config.projects.keys()),
-        )
+        logger.info(f"loaded config from {path}: projects={list(_yaml_config.projects.keys())}")
         for project_name, project_config in _yaml_config.projects.items():
             for db in project_config.databases:
                 key = (project_name, db.port)
@@ -64,10 +60,10 @@ def _load_config() -> dict[tuple[str, int], DatabaseEntry] | None:
             f"{k[0]!r}:{k[1]}": {"uri": v.uri, "port": v.port}
             for k, v in _config.items()
         }
-        logger.info("config: %s", json.dumps(log_config, indent=2))
+        logger.info(f"config: {json.dumps(log_config, indent=2)}")
         return _config
     except Exception as e:
-        logger.warning("Failed to load FIFTYONE_DATABASE_URI_CONFIG from %s: %s", path, e)
+        logger.warning(f"Failed to load FIFTYONE_DATABASE_URI_CONFIG from {path}: {e}")
         _config = None
         _yaml_config = None
         return None
@@ -172,4 +168,4 @@ def release_session(project_id: int, port: int) -> None:
             proc.terminate()
             proc.wait(timeout=5)
         del _sessions[key]
-        logger.info("Released session for project_id=%s port=%s", project_id, port)
+        logger.info(f"Released session for project_id={project_id} port={port}")

@@ -117,7 +117,7 @@ async def _poll_fastvss_result(job_id: str) -> None:
     except Exception as e:
         if "404" in str(e) or "not ready" in str(e).lower():
             return  # Still pending
-        logger.warning("Poll Fast-VSS failed: %s", e)
+        logger.warning(f"Poll Fast-VSS failed: {e}")
         async with _queue_lock:
             _queue_results[job_id] = {"status": "failed", "embeddings": None, "error": str(e)}
             _job_map.pop(job_id, None)

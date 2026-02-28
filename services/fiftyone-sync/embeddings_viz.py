@@ -8,9 +8,12 @@ UMAP requires umap-learn (see requirements.txt).
 
 from __future__ import annotations
 
+import logging
 import os
 import time
 from typing import TYPE_CHECKING, Optional
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     import fiftyone as fo
@@ -64,7 +67,7 @@ def _compute_embeddings_via_service(
     for s in samples:
         fp = s["filepath"]
         if not os.path.isfile(fp):
-            print(f"[embeddings] Skipping missing file: {fp}", flush=True)
+            logger.warning(f"Skipping missing file: {fp}")
             continue
         with open(fp, "rb") as f:
             data = f.read()
@@ -72,7 +75,7 @@ def _compute_embeddings_via_service(
         bytes_list.append(data)
 
     if not bytes_list:
-        print("[embeddings] No valid image files to embed", flush=True)
+        logger.warning("No valid image files to embed")
         return
 
     # Submit all batches, then poll all jobs
@@ -83,7 +86,7 @@ def _compute_embeddings_via_service(
         # Phase 1: submit every batch and collect job IDs
         for start in range(0, len(bytes_list), batch_size):
             batch_idx = start // batch_size
-            print(f"[embeddings] Submitting batch {batch_idx + 1}/{num_batches}")
+            logger.info(f"Submitting batch {batch_idx + 1}/{num_batches}")
             batch = bytes_list[start : start + batch_size]
             files = [("files", (f"img_{i}.jpg", data)) for i, data in enumerate(batch)]
             url = f"{base}/embed/{project_name}"
@@ -93,15 +96,15 @@ def _compute_embeddings_via_service(
 
             err = data.get("error")
             if err:
-                print(f"[embeddings] Embed service returned error for batch {batch_idx + 1}: {err}")
+                logger.error(f"Embed service returned error for batch {batch_idx + 1}: {err}")
                 return
 
             job_id = data.get("job_id")
             if not job_id:
-                print(f"[embeddings] No job_id in response for batch {batch_idx + 1}: {data}")
+                logger.error(f"No job_id in response for batch {batch_idx + 1}: {data}")
                 return
             jobs.append((batch_idx, job_id))
-            print(f"[embeddings] Batch {batch_idx + 1} submitted -> job {job_id}")
+            logger.info(f"Batch {batch_idx + 1} submitted -> job {job_id}")
 
         # Phase 2: poll all jobs until every one is done
         all_embeddings: list[list] = [[] for _ in range(num_batches)]
@@ -123,12 +126,12 @@ def _compute_embeddings_via_service(
                         all_embeddings[batch_idx] = (
                             emb if isinstance(emb[0], (list, tuple)) else [emb]
                         )
-                    print(f"[embeddings] Batch {batch_idx + 1} done ({len(all_embeddings[batch_idx])} vectors)")
+                    logger.info(f"Batch {batch_idx + 1} done ({len(all_embeddings[batch_idx])} vectors)")
                 else:
                     still_pending[batch_idx] = job_id
             pending = still_pending
             if pending:
-                print(f"[embeddings] {len(pending)}/{num_batches} batches still pending…")
+                logger.info(f"{len(pending)}/{num_batches} batches still pending…")
                 time.sleep(poll_interval)
 
         if pending:
@@ -139,10 +142,7 @@ def _compute_embeddings_via_service(
     all_embeddings = [vec for batch_embs in all_embeddings for vec in batch_embs]
 
     if len(all_embeddings) != len(filepaths):
-        print(
-            f"[embeddings] Warning: got {len(all_embeddings)} embeddings for {len(filepaths)} images",
-            flush=True,
-        )
+        logger.warning(f"Got {len(all_embeddings)} embeddings for {len(filepaths)} images")
 
     # Map back to samples by filepath; store as 1D numpy arrays so FiftyOne infers VectorField
     # (list of floats infers ListField, which brain/UMAP may not treat as embeddings)
@@ -169,7 +169,7 @@ def _compute_embeddings_via_service(
             else:
                 s[embeddings_field] = None
         dataset.save()
-    print(f"✓ Embeddings stored in: {embeddings_field} ({len(fp_to_emb)} samples)", flush=True)
+    logger.info(f"Embeddings stored in: {embeddings_field} ({len(fp_to_emb)} samples)")
 
 
 def compute_embeddings_and_viz(
@@ -207,26 +207,19 @@ def compute_embeddings_and_viz(
     brain_key = model_info["brain_key"]
     base_url = (service_url or EMBED_SERVICE_BASE_URL).rstrip("/")
 
-    print(f"\n{'='*80}")
-    print("Embeddings from service:", f"{base_url}/embed/")
-    print(f"  Project name: {project_name}")
-    print(f"  Embeddings field: {embeddings_field}")
-    print(f"  Brain key: {brain_key}")
-    print(f"  Batch size: {batch_size}")
-    print(f"{'='*80}")
+    logger.info(f"Embeddings from service: {base_url}/embed/ | project={project_name} field={embeddings_field} brain_key={brain_key} batch_size={batch_size}")
 
     # --- Embeddings (from service) ---
     embeddings_exist = has_embeddings(dataset, embeddings_field)
     if embeddings_exist and not force_embeddings:
-        print(f"\n✓ Embeddings already cached in '{embeddings_field}' - skipping computation")
-        print("  (use force_embeddings in config to recompute)")
+        logger.info(f"Embeddings already cached in '{embeddings_field}' - skipping computation (use force_embeddings to recompute)")
     else:
         if not project_name:
             raise ValueError(
                 "Embeddings from service require project_name (Tator project name from get_project(project_id).name)"
             )
         if embeddings_exist and force_embeddings:
-            print("\n⟳ Force recomputing embeddings (cached embeddings will be overwritten)")
+            logger.info("Force recomputing embeddings (cached embeddings will be overwritten)")
 
         _compute_embeddings_via_service(
             dataset,
@@ -243,9 +236,8 @@ def compute_embeddings_and_viz(
     try:
         import umap  # noqa: F401
     except ImportError:
-        print(
-            "\n⚠ UMAP visualization skipped (install umap-learn). Embeddings are stored.",
-            flush=True,
+        logger.warning(
+            "UMAP visualization skipped (install umap-learn). Embeddings are stored."
         )
         return
 
@@ -253,24 +245,20 @@ def compute_embeddings_and_viz(
     view_with_emb = dataset.exists(embeddings_field)
     n_with_emb = view_with_emb.count()
     if n_with_emb == 0:
-        print(
-            "\n⚠ UMAP skipped: no samples have embeddings (need at least 1). Embeddings may be missing or failed.",
-            flush=True,
+        logger.warning(
+            "UMAP skipped: no samples have embeddings (need at least 1). Embeddings may be missing or failed."
         )
         return
 
     brain_run_exists = has_brain_run(dataset, brain_key)
     if brain_run_exists and not force_umap:
-        print(
-            f"\n✓ UMAP visualization already cached with brain key '{brain_key}' - skipping computation"
-        )
-        print("  (use force_umap in config to recompute)")
+        logger.info(f"UMAP visualization already cached with brain key '{brain_key}' - skipping computation (use force_umap to recompute)")
     else:
         if brain_run_exists and force_umap:
-            print("\n⟳ Force recomputing UMAP (deleting existing brain run)")
+            logger.info("Force recomputing UMAP (deleting existing brain run)")
             dataset.delete_brain_run(brain_key)
 
-        print(f"\nComputing UMAP visualization ({n_with_emb} samples with embeddings)...")
+        logger.info(f"Computing UMAP visualization ({n_with_emb} samples with embeddings)...")
         fob.compute_visualization(
             view_with_emb,
             embeddings=embeddings_field,
@@ -279,4 +267,4 @@ def compute_embeddings_and_viz(
             verbose=True,
             seed=umap_seed,
         )
-        print(f"✓ Visualization stored with brain key: {brain_key}")
+        logger.info(f"Visualization stored with brain key: {brain_key}")

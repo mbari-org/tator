@@ -331,10 +331,6 @@ def fetch_and_save_localizations(
                     kw.update(_version_kw())
                     if after_id is not None:
                         kw["after"] = after_id
-                    logger.info(
-                        f"get_localization_list(project={project_id}, "
-                        f"media_batch={bidx + 1}/{len(media_id_batches)}, {kw})"
-                    )
                     try:
                         locs = api.get_localization_list(project_id, **kw)
                     except Exception as e:
@@ -1030,7 +1026,7 @@ def build_fiftyone_dataset_from_crops(
 
     # Handle existing dataset: always reconcile, never delete
     if dataset_name in fo.list_datasets(): 
-        logger.info(f"Reconcile: loading dataset {dataset_name}")
+        logger.info(f"Reconcile: loading dataset {dataset_name}...")
         dataset = fo.load_dataset(dataset_name)
         dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
         dataset = reconcile_dataset_with_tator(
@@ -1563,7 +1559,7 @@ def main() -> None:
 
     # Fetch media IDs (lightweight)
     media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
-    logger.info("media_ids: %s", media_ids)
+    logger.info(f"media_ids: {media_ids}")
 
     # Fetch localizations first (cheap metadata)
     localizations_path = fetch_and_save_localizations(
@@ -1575,7 +1571,7 @@ def main() -> None:
         media_id_batch_size=media_id_batch_size_cli,
     )
     if localizations_path:
-        logger.info("saved_localizations_path (JSONL): %s", localizations_path)
+        logger.info(f"saved_localizations_path (JSONL): {localizations_path}")
 
     dl_dir = _download_dir(project_id)
     crops = _crops_dir(project_id, version_id)
