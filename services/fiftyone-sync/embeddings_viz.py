@@ -16,9 +16,7 @@ if TYPE_CHECKING:
     import fiftyone as fo
 
 # Base URL for embed service (POST /embed/{project} no trailing slash, GET /predict/job/{job_id}/{project})
-EMBED_SERVICE_BASE_URL = os.environ.get(
-    "FASTVSS_API_URL", "http://doris.shore.mbari.org:8000"
-).rstrip("/")
+EMBED_SERVICE_BASE_URL = os.environ.get("FASTVSS_API_URL", "http://cortext.shore.mbari.org/vss").rstrip("/")
 
 
 def has_embeddings(dataset: "fo.Dataset", embeddings_field: str) -> bool:
@@ -79,7 +77,7 @@ def _compute_embeddings_via_service(
 
     # Process in batches
     all_embeddings = []
-    with httpx.Client(timeout=60.0) as client:
+    with httpx.Client(timeout=5.0) as client:
         for start in range(0, len(bytes_list), batch_size):
             print(f"[embeddings] Processing batch {start // batch_size + 1} of {len(bytes_list) // batch_size}")
             batch = bytes_list[start : start + batch_size]
@@ -90,7 +88,12 @@ def _compute_embeddings_via_service(
             data = resp.json()
             print(f"[embeddings] Response: {data}")
 
-            job_id = data.get("job_id")
+            err = data.get("error")
+            if err:
+                print(f"[embeddings] Embed service returned error: {err}")
+                return
+
+            job_id = data.get("job_id", None)
             if job_id:
                 print(f"[embeddings] Polling Job ID: {job_id}")
                 # Poll GET /predict/job/{job_id}/{project_name} until status == "done", then use result.embeddings
@@ -115,6 +118,9 @@ def _compute_embeddings_via_service(
                     raise TimeoutError(
                         f"Embed service did not return status=done within {poll_timeout}s"
                     ) 
+            else:
+                print(f"[embeddings] No job_id in response (may be sync response or error above): {data}")
+                return
 
     if len(all_embeddings) != len(filepaths):
         print(
@@ -190,6 +196,7 @@ def compute_embeddings_and_viz(
     print(f"  Project name: {project_name}")
     print(f"  Embeddings field: {embeddings_field}")
     print(f"  Brain key: {brain_key}")
+    print(f"  Batch size: {batch_size}")
     print(f"{'='*80}")
 
     # --- Embeddings (from service) ---

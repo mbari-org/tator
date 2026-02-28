@@ -213,6 +213,8 @@ LAUNCHER_TEMPLATE = r"""
     .applet-header input[type="password"] { padding: 0.35rem 0.5rem; font-size: 0.8rem; background: #2a2a2a; color: #e0e0e0; border: 1px solid #555; border-radius: 4px; min-width: 12rem; }
     .applet-header a.token-link { font-size: 0.8rem; color: #6ab; }
     .applet-header a.token-link:hover { color: #8cd; text-decoration: underline; }
+    .applet-header a.fiftyone-app-link { font-size: 0.8rem; color: #6ab; margin-left: 0.5rem; }
+    .applet-header a.fiftyone-app-link:hover { color: #8cd; text-decoration: underline; }
     .applet-header table { border-collapse: collapse; width: 100%; max-width: 56rem; }
     .applet-header th { text-align: left; padding: 0.5rem 1rem 0.25rem 0; font-size: 0.75rem; color: #999; font-weight: 600; vertical-align: top; white-space: nowrap; }
     .applet-header td { padding: 0.25rem 0; vertical-align: middle; }
@@ -265,6 +267,7 @@ LAUNCHER_TEMPLATE = r"""
               <button type="button" id="sync-from-tator-btn" disabled title="Loads the selected version and launches a Voxel51 (FiftyOne) viewer in another tab. If the Embedding Service is not available, the viewer will still launch but will not contain embeddings."><span class="btn-icon" aria-hidden="true">←</span>Load from Tator</button>
               <button type="button" id="sync-to-tator-btn" disabled title="Pushes any revised data from FiftyOne back to the selected version.">Sync to Tator<span class="btn-icon end" aria-hidden="true">→</span></button>
               <span id="sync-status" class="sync-status" aria-live="polite"></span>
+              <a id="fiftyone-app-link" href="#" target="_blank" rel="noopener" class="fiftyone-app-link" style="display: none;">Open FiftyOne viewer</a>
             </div>
           </td>
         </tr>
@@ -299,6 +302,7 @@ LAUNCHER_TEMPLATE = r"""
       var initialVersionId = "{{ version_id | default('') | e }}";
       var syncBtn = document.getElementById('sync-from-tator-btn');
       var syncStatus = document.getElementById('sync-status');
+      var fiftyoneAppLink = document.getElementById('fiftyone-app-link');
       var versionSelect = document.getElementById('version-select');
       var syncToTatorBtn = document.getElementById('sync-to-tator-btn');
       var tokenInput = document.getElementById('user-token');
@@ -335,7 +339,7 @@ LAUNCHER_TEMPLATE = r"""
             (versions || []).forEach(function(v) {
               var opt = document.createElement('option');
               opt.value = String(v.id);
-              opt.textContent = v.name + (v.number != null ? ' (' + v.number + ')' : '');
+              opt.textContent = v.name + (v.id != null ? ' (' + v.id + ')' : '');
               versionSelect.appendChild(opt);
             });
             if (initialVersionId && versionSelect.querySelector('option[value="' + initialVersionId + '"]')) {
@@ -472,6 +476,7 @@ LAUNCHER_TEMPLATE = r"""
           syncBtn.disabled = true;
           syncStatus.textContent = 'Syncing…';
           syncStatus.classList.remove('error');
+          if (fiftyoneAppLink) fiftyoneAppLink.style.display = 'none';
           var params = new URLSearchParams({ project_id: String(project), api_url: apiUrl, token: token, launch_app: 'true', port: port });
           if (v) params.set('version_id', v);
           var fullSyncUrl = syncServiceUrl + '/sync?' + params.toString();
@@ -511,17 +516,17 @@ LAUNCHER_TEMPLATE = r"""
                           syncBtn.disabled = false;
                           return;
                         }
-                        syncStatus.textContent = 'Sync done. Opening FiftyOne…';
-                        var openUrl = appUrl;
-                        if (res.dataset_name) {
-                          openUrl = appUrl.replace(/\/$/, '') + '/datasets/' + encodeURIComponent(res.dataset_name);
+                        syncStatus.textContent = res.sample_count != null
+                          ? 'Sync done. ' + res.sample_count + ' samples.'
+                          : 'Sync done.';
+                        var baseUrl = (res.app_url && res.app_url.replace(/\/$/, '')) || ('http://' + iframeHost + ':' + (res.port != null ? res.port : port));
+                        var openUrl = res.dataset_name
+                          ? baseUrl + '/datasets/' + encodeURIComponent(res.dataset_name)
+                          : baseUrl;
+                        if (fiftyoneAppLink) {
+                          fiftyoneAppLink.href = openUrl;
+                          fiftyoneAppLink.style.display = '';
                         }
-                        setTimeout(function() {
-                          window.open(openUrl, '_blank');
-                          syncStatus.textContent = res.sample_count != null
-                            ? 'Opened with ' + res.sample_count + ' samples.'
-                            : 'Opened.';
-                        }, 1500);
                         setTimeout(function() { syncStatus.textContent = ''; }, 5000);
                         syncBtn.disabled = false;
                         return;
@@ -538,17 +543,17 @@ LAUNCHER_TEMPLATE = r"""
                 poll();
                 return;
               }
-              syncStatus.textContent = 'Sync done. Opening FiftyOne…';
-              var openUrl = appUrl;
-              if (data.dataset_name) {
-                openUrl = appUrl.replace(/\/$/, '') + '/datasets/' + encodeURIComponent(data.dataset_name);
+              syncStatus.textContent = data.sample_count != null
+                ? 'Sync done. ' + data.sample_count + ' samples.'
+                : 'Sync done.';
+              var baseUrl = data.app_url || 'http://localhost:' + port;
+              var openUrl = data.dataset_name
+                ? baseUrl + '/datasets/' + encodeURIComponent(data.dataset_name)
+                : baseUrl;
+              if (fiftyoneAppLink) {
+                fiftyoneAppLink.href = openUrl;
+                fiftyoneAppLink.style.display = '';
               }
-              setTimeout(function() {
-                window.open(openUrl, '_blank');
-                syncStatus.textContent = data.sample_count != null
-                  ? 'Opened with ' + data.sample_count + ' samples.'
-                  : 'Opened.';
-              }, 3500);
               setTimeout(function() { syncStatus.textContent = ''; }, 5000);
               syncBtn.disabled = false;
             })
@@ -666,6 +671,9 @@ async def render_launcher() -> HTMLResponse:
     Return Jinja2 template for HostedTemplate. Tator fetches this URL and renders with tparams.
     Required tparams: project (Tator project ID). Optional: iframe_host (host for app URL), base_port (5151), project_name (vss_project for embedding status only).
     The applet uses GET /database-info?project_id=... to resolve port and database from DatabaseUriConfig.
+    When the sync worker runs on a different host than the API, set FIFTYONE_APP_PUBLIC_BASE_URL in the worker
+    environment to the hostname the browser can use to reach the FiftyOne app (e.g. worker host); the sync
+    result will include app_url and the applet will open that URL.
     "Open FiftyOne" opens the app in a new window. For sync: set sync_service_url and api_url; the user enters their Tator API token in the applet and clicks "Test token" to enable Sync from Tator / Sync to Tator.
     Embedding service status: server uses FASTVSS_API_URL; applet calls GET /vss-embedding to show availability and project registration.
     """

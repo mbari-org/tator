@@ -69,9 +69,8 @@ def _test_mongodb_connection(database_uri: str, timeout_ms: int = 5000) -> None:
 
 def _stop_process_on_port(port: int) -> None:
     """
-    Try to stop any process listening on the given port so that launch_app
-    starts a fresh FiftyOne server with the newly synced dataset. If an old
-    server is left running, FiftyOne connects to it and never loads our dataset.
+    Try to stop any process listening on the given port (e.g. so another
+    process can bind to it). Used by the CLI when re-running sync.
     """
     if sys.platform not in ("darwin", "linux", "linux2"):
         return
@@ -97,27 +96,6 @@ def _stop_process_on_port(port: int) -> None:
         logging.getLogger(__name__).debug(f"Could not stop process on port {port}: {e}")
 
 
-def _launch_app_embedded(dataset: fo.Dataset, port: int):
-    """
-    Launch FiftyOne app browser tab
-    Uses remote=True so FiftyOne does not open a browser; we suppress FiftyOne's
-    SSH port-forwarding message and logger.info a short note for the Tator dashboard instead.
-    See https://docs.voxel51.com/installation/environments.html#remote-data
-    """
-    fo_session_logger = logging.getLogger("fiftyone.core.session.session")
-    old_level = fo_session_logger.level
-    fo_session_logger.setLevel(logging.WARNING)
-    try:
-        session = fo.launch_app(dataset, port=port, address="0.0.0.0", remote=True)
-    finally:
-        fo_session_logger.setLevel(old_level)
-    logger.info(
-        f"FiftyOne app is running on port {port}. "
-        "Open it in the Tator dashboard at http://<host>:{port})".format(port=port),
-    )
-    return session
-
-
 LOCALIZATION_BATCH_SIZE = 5000
 MEDIA_ID_BATCH_SIZE = 200
 
@@ -131,11 +109,48 @@ def _json_serial(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
 
 
+_SYNC_BASE = os.environ.get("FIFTYONE_SYNC_BASE", "/tmp/fiftyone_sync")
+
+
 def _project_tmp_dir(project_id: int) -> str:
-    """Return a project-isolated directory under /tmp for synced media."""
+    """Return a project-isolated directory under /tmp for synced media.
+
+    .. deprecated:: Use the specialized helpers (_download_dir, _data_dir,
+       _crops_dir, _localizations_jsonl_path) instead.
+    """
     path = os.path.join("/tmp", f"fiftyone_sync_project_{project_id}")
     os.makedirs(path, exist_ok=True)
     return path
+
+
+def _version_slug(version_id: int | None) -> str:
+    return f"v{version_id}" if version_id is not None else "v_all"
+
+
+def _download_dir(project_id: int) -> str:
+    """Ephemeral media-download directory, isolated from JSONL and crops."""
+    path = os.path.join(_SYNC_BASE, "downloads", str(project_id))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _data_dir(project_id: int, version_id: int | None) -> str:
+    """Per-project+version directory for JSONL, crops, and manifest."""
+    path = os.path.join(_SYNC_BASE, "data", str(project_id), _version_slug(version_id))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _crops_dir(project_id: int, version_id: int | None) -> str:
+    """Per-project+version crops directory."""
+    path = os.path.join(_data_dir(project_id, version_id), "crops")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _localizations_jsonl_path(project_id: int, version_id: int | None) -> str:
+    """Per-project+version JSONL path."""
+    return os.path.join(_data_dir(project_id, version_id), "localizations.jsonl")
 
 
 def fetch_project_media_ids(
@@ -196,14 +211,12 @@ def save_media_to_tmp(
     media_ids_filter: set[int] | None = None,
 ) -> str:
     """
-    Download each media to a project-isolated /tmp folder, always under a 'download' subdir.
+    Download each media to an isolated download directory.
     Videos are skipped (download not supported). Existing non-empty files are skipped.
     When media_ids_filter is provided, only media whose id is in the set are downloaded.
     Retries each download up to 3 times. Returns the download directory path.
     """
-    base_dir = _project_tmp_dir(project_id)
-    out_dir = os.path.join(base_dir, "download")
-    os.makedirs(out_dir, exist_ok=True)
+    out_dir = _download_dir(project_id)
     valid = [m for m in media_objects if isinstance(m, tator.models.Media)]
     if media_ids_filter is not None:
         valid = [m for m in valid if m.id in media_ids_filter]
@@ -244,7 +257,6 @@ def save_media_to_tmp(
 
 def fetch_and_save_localizations(
     api: Any,
-    port: int,
     project_id: int,
     version_id: int | None = None,
     media_ids: list[int] | None = None,
@@ -260,8 +272,7 @@ def fetch_and_save_localizations(
     Media IDs are batched into groups of MEDIA_ID_BATCH_SIZE to avoid 414 Request-URI Too Large
     errors from nginx when the project has many media.
     """
-    base_dir = _project_tmp_dir(project_id)
-    out_path = os.path.join(base_dir, f"localizations_{port}.jsonl")
+    out_path = _localizations_jsonl_path(project_id, version_id)
     logger.info(f"Localizations JSONL will be saved to: {out_path}")
     batch_size = LOCALIZATION_BATCH_SIZE
 
@@ -271,14 +282,12 @@ def fetch_and_save_localizations(
     )
     logger.info(f"Media ID batches: {len(media_id_batches)} batch(es) of up to {MEDIA_ID_BATCH_SIZE}")
 
-    def _version_kw(use_ver: bool) -> dict:
-        return {"version": [version_id]} if use_ver and version_id is not None else {}
-
-    use_version = True
+    def _version_kw() -> dict:
+        return {"version": [version_id]} if version_id is not None else {}
     try:
         loc_count = 0
         for mid_batch in media_id_batches:
-            kw = _version_kw(True)
+            kw = _version_kw()
             if mid_batch:
                 kw["media_id"] = mid_batch
             loc_count += api.get_localization_count(project_id, **kw)
@@ -291,15 +300,19 @@ def fetch_and_save_localizations(
                     kw["media_id"] = mid_batch
                 count_no_ver += api.get_localization_count(project_id, **kw)
             if count_no_ver > 0:
-                logger.info(f"Version {version_id} has 0 localizations; falling back to all versions (count={count_no_ver})")
-                use_version = False
+                raise ValueError(
+                    f"Version {version_id} has 0 localizations but {count_no_ver} exist across other versions; "
+                    f"check that the correct version is specified"
+                )
+    except ValueError:
+        raise
     except Exception as e:
         loc_count = None
         logger.exception(f"get_localization_count failed (will still try list): {e}")
 
     total = 0
     with open(out_path, "w") as f:
-        def _fetch_all_locs(use_ver: bool) -> int:
+        def _fetch_all_locs() -> int:
             """Fetch localizations across all media_id batches, paginating each. Returns count."""
             fetched = 0
             for bidx, mid_batch in enumerate(media_id_batches):
@@ -308,7 +321,7 @@ def fetch_and_save_localizations(
                     kw = {"stop": batch_size}
                     if mid_batch:
                         kw["media_id"] = mid_batch
-                    kw.update(_version_kw(use_ver))
+                    kw.update(_version_kw())
                     if after_id is not None:
                         kw["after"] = after_id
                     logger.info(
@@ -336,12 +349,7 @@ def fetch_and_save_localizations(
                         break
             return fetched
 
-        total = _fetch_all_locs(use_version)
-        if total == 0 and version_id is not None and use_version:
-            logger.info(f"No localizations with version={version_id}; retrying without version filter")
-            f.seek(0)
-            f.truncate()
-            total = _fetch_all_locs(False)
+        total = _fetch_all_locs()
 
     logger.info(f"Fetched {total} localizations -> {out_path}")
     return out_path
@@ -531,17 +539,17 @@ def _box_hash(loc: dict | None) -> str:
     ).hexdigest()
 
 
-def _crop_manifest_path(project_id: int, port: int) -> str:
-    """Path to the crop manifest JSON for a project/port combination."""
-    return os.path.join(_project_tmp_dir(project_id), f"crop_manifest_{port}.json")
+def _crop_manifest_path(project_id: int, version_id: int | None) -> str:
+    """Path to the crop manifest JSON for a project+version."""
+    return os.path.join(_data_dir(project_id, version_id), "crop_manifest.json")
 
 
-def _load_crop_manifest(project_id: int, port: int) -> dict[str, dict]:
+def _load_crop_manifest(project_id: int, version_id: int | None) -> dict[str, dict]:
     """
     Load the crop manifest from disk.
     Returns {elemental_id: {"box_hash": str, "media_id": int, "media_stem": str}} or empty dict.
     """
-    path = _crop_manifest_path(project_id, port)
+    path = _crop_manifest_path(project_id, version_id)
     if not os.path.exists(path):
         return {}
     try:
@@ -552,9 +560,9 @@ def _load_crop_manifest(project_id: int, port: int) -> dict[str, dict]:
         return {}
 
 
-def _save_crop_manifest(project_id: int, port: int, manifest: dict[str, dict]) -> None:
+def _save_crop_manifest(project_id: int, version_id: int | None, manifest: dict[str, dict]) -> None:
     """Atomically write the crop manifest to disk."""
-    path = _crop_manifest_path(project_id, port)
+    path = _crop_manifest_path(project_id, version_id)
     tmp_path = path + ".tmp"
     try:
         with open(tmp_path, "w") as f:
@@ -566,13 +574,13 @@ def _save_crop_manifest(project_id: int, port: int, manifest: dict[str, dict]) -
 
 def _cleanup_download_dir(project_id: int) -> None:
     """Remove the download directory to reclaim disk space after crops are produced."""
-    download_dir = os.path.join(_project_tmp_dir(project_id), "download")
-    if os.path.isdir(download_dir):
+    dl_dir = _download_dir(project_id)
+    if os.path.isdir(dl_dir):
         try:
-            shutil.rmtree(download_dir)
-            logger.info(f"Removed download directory: {download_dir}")
+            shutil.rmtree(dl_dir)
+            logger.info(f"Removed download directory: {dl_dir}")
         except OSError as e:
-            logger.info(f"Could not remove download directory {download_dir}: {e}")
+            logger.info(f"Could not remove download directory {dl_dir}: {e}")
 
 
 def _find_crop_cache_misses(
@@ -774,6 +782,27 @@ def _media_id_to_stem(download_dir: str) -> dict[int, str]:
     return out
 
 
+def _media_id_to_stem_from_crops(crops_dir: str) -> dict[int, str]:
+    """Fallback: derive media_id -> stem mapping from crops subdirectory names.
+
+    Crops are stored as crops_dir/{media_stem}/{eid}.png where media_stem
+    typically starts with the numeric media_id (e.g. '12345' or '12345_image').
+    """
+    out: dict[int, str] = {}
+    if not crops_dir or not os.path.isdir(crops_dir):
+        return out
+    for d in Path(crops_dir).iterdir():
+        if not d.is_dir():
+            continue
+        stem = d.name
+        try:
+            mid = int(stem.split("_", 1)[0])
+            out[mid] = stem
+        except ValueError:
+            pass
+    return out
+
+
 def _create_sample_from_loc(
     loc: dict,
     crops_dir: str,
@@ -819,7 +848,6 @@ def reconcile_dataset_with_tator(
     crops_dir: str,
     download_dir: str | None,
     config: dict[str, Any],
-    image_extensions: list[str],
     max_samples: int | None,
 ) -> fo.Dataset:
     """
@@ -831,6 +859,8 @@ def reconcile_dataset_with_tator(
     tator_eids = set(loc_index.keys())
     include_classes = set(config.get("include_classes") or [])
     media_id_to_stem = _media_id_to_stem(download_dir) if download_dir else {}
+    if not media_id_to_stem:
+        media_id_to_stem = _media_id_to_stem_from_crops(crops_dir)
 
     # 1. Remove samples deleted in Tator (only when we have a non-empty localization set from Tator)
     # If Tator returns 0 localizations (e.g. wrong version or API filter), do not remove existing samples
@@ -1000,7 +1030,6 @@ def build_fiftyone_dataset_from_crops(
             crops_dir=crops_dir,
             download_dir=download_dir,
             config=config,
-            image_extensions=image_extensions,
             max_samples=max_samples,
         )
         logger.info(f"Reconcile: dataset {dataset_name} loaded")
@@ -1275,41 +1304,36 @@ def sync_project_to_fiftyone(
         }
 
     try:
-        media_ids_list: list[int] = []
-        tmp_dir = ""
+        dl_dir = _download_dir(project_id)
         localizations_path = ""
-        crops_dir = ""
+        crops = _crops_dir(project_id, version_id)
         try:
             host = api_url.rstrip("/")
             api = tator.get_api(host, token)
 
             # 1. Fetch media IDs (lightweight metadata, needed for localization query)
-            logger.info(f"Fetching media IDs... {host} {project_id} {api_url}")
+            logger.info(f"Fetching media IDs... host={host} project_id={project_id} api_url={api_url}")
             media_ids_list = fetch_project_media_ids(api_url, token, project_id)
 
             # 2. Fetch localizations first (cheap metadata)
             logger.info("Fetching localizations...")
             localizations_path = fetch_and_save_localizations(
-                api, port, project_id, version_id=version_id, media_ids=media_ids_list or None
+                api, project_id, version_id=version_id, media_ids=media_ids_list or None
             )
             if localizations_path:
                 logger.info(f"saved_localizations_path (JSONL): {localizations_path}")
 
-            crops_dir = os.path.join(_project_tmp_dir(project_id), "crops")
-            tmp_dir = os.path.join(_project_tmp_dir(project_id), "download")
-            os.makedirs(tmp_dir, exist_ok=True)
-
             # 3. Determine which crops are missing or stale (cache miss)
-            old_manifest = _load_crop_manifest(project_id, port)
+            old_manifest = _load_crop_manifest(project_id, version_id)
             media_ids_needed, locs_to_crop, updated_manifest = _find_crop_cache_misses(
                 localizations_jsonl_path=localizations_path,
-                crops_dir=crops_dir,
+                crops_dir=crops,
                 manifest=old_manifest,
-                download_dir=tmp_dir,
+                download_dir=dl_dir,
             )
 
             # 4. Clean up orphaned crop files for deleted localizations
-            _cleanup_deleted_crops(old_manifest, updated_manifest, crops_dir)
+            _cleanup_deleted_crops(old_manifest, updated_manifest, crops)
 
             # 5. Download only media that have cache misses
             if not media_ids_list:
@@ -1324,21 +1348,21 @@ def sync_project_to_fiftyone(
                     logger.info(f"No Media objects returned for {len(needed_ids)} ids; skipping download")
                 else:
                     logger.info(f"Downloading {len(all_media)} media to tmp...")
-                    tmp_dir = save_media_to_tmp(api, project_id, all_media, media_ids_filter=media_ids_needed)
+                    dl_dir = save_media_to_tmp(api, project_id, all_media, media_ids_filter=media_ids_needed)
 
             # 6. Crop only the cache-miss localizations
             if locs_to_crop and localizations_path:
                 crop_localizations_parallel(
-                    tmp_dir, localizations_path, crops_dir, size=224, locs_to_crop=locs_to_crop,
+                    dl_dir, localizations_path, crops, size=224, locs_to_crop=locs_to_crop,
                 )
             elif not locs_to_crop:
                 logger.info("No crop cache misses; skipping crop step")
 
             # 7. Patch manifest stems from actual downloaded filenames
-            _patch_manifest_stems(updated_manifest, tmp_dir)
+            _patch_manifest_stems(updated_manifest, dl_dir)
 
             # 8. Persist the updated manifest
-            _save_crop_manifest(project_id, port, updated_manifest)
+            _save_crop_manifest(project_id, version_id, updated_manifest)
 
             # 9. Remove downloaded media to reclaim disk space
             _cleanup_download_dir(project_id)
@@ -1349,9 +1373,9 @@ def sync_project_to_fiftyone(
                 "status": "error",
                 "message": str(e),
                 "database_name": resolved_db,
-                "saved_media_dir": tmp_dir or None,
+                "saved_media_dir": dl_dir or None,
                 "saved_localizations_path": localizations_path or None,
-                "saved_crops_dir": crops_dir or None,
+                "saved_crops_dir": crops or None,
             }
 
         if not localizations_path:
@@ -1361,9 +1385,9 @@ def sync_project_to_fiftyone(
                 "message": "No crops to load; media/localizations missing or empty",
                 "database_name": resolved_db,
                 "dataset_name": None,
-                "saved_media_dir": tmp_dir or None,
+                "saved_media_dir": dl_dir or None,
                 "saved_localizations_path": localizations_path or None,
-                "saved_crops_dir": crops_dir or None,
+                "saved_crops_dir": crops or None,
             }
 
         # Load config from YAML/JSON if provided
@@ -1390,11 +1414,11 @@ def sync_project_to_fiftyone(
         try:
             logger.info(f"Building dataset {dataset_name}")
             dataset = build_fiftyone_dataset_from_crops(
-                crops_dir=crops_dir,
+                crops_dir=crops,
                 localizations_jsonl_path=localizations_path,
                 dataset_name=dataset_name,
                 config=config,
-                download_dir=tmp_dir or None,
+                download_dir=dl_dir or None,
             )
         except Exception as e:
             logger.info(f"Dataset build failed: {e}")
@@ -1403,9 +1427,9 @@ def sync_project_to_fiftyone(
                 "message": str(e),
                 "database_name": resolved_db,
                 "dataset_name": None,
-                "saved_media_dir": tmp_dir or None,
+                "saved_media_dir": dl_dir or None,
                 "saved_localizations_path": localizations_path or None,
-                "saved_crops_dir": crops_dir or None,
+                "saved_crops_dir": crops or None,
             }
 
         logger.info(f"sync_project_to_fiftyone done: dataset={dataset_name}")
@@ -1421,8 +1445,6 @@ def sync_project_to_fiftyone(
         embeddings_config = config.get("embeddings") or {}
         if not isinstance(embeddings_config, dict):
             embeddings_config = {}
-        # Resolve project key for embed/VSS service: vss_project from DatabaseUriConfig (by project name), else embeddings config, else project_id.
-        project_name_for_config = None
         try:
             proj = api.get_project(project_id)
             project_name_for_config = getattr(proj, "name", None) or str(project_id)
@@ -1468,31 +1490,25 @@ def sync_project_to_fiftyone(
         else:
             logger.info("No vss_project; skipping embeddings/UMAP")
 
-        if launch_app:
-            # Reload dataset from MongoDB so the server (which loads from DB) sees the same state
-            try:
-                dataset.reload()
-                sample_count = len(dataset)
-                logger.info(f"Reloaded dataset from DB: {sample_count} samples")
-            except Exception as e:
-                logging.getLogger(__name__).debug(f"Dataset reload before launch: {e}")
-            logger.info(f"Launching FiftyOne app on port {port}...")
-            # _stop_process_on_port(port)
-            session = _launch_app_embedded(dataset, port)
-            try:
-                session.refresh()
-            except Exception as e:
-                logging.getLogger(__name__).debug("Session refresh (delayed): %s", e)
+        # URL for the launcher: must use FIFTYONE_APP_PUBLIC_BASE_URL so the dashboard
+        # opens the correct FiftyOne app (e.g. maximilian.shore.mbari.org), always http.
+        public_url = os.environ.get("FIFTYONE_APP_PUBLIC_BASE_URL", "http://localhost").strip()
+        app_url = f"{public_url.rstrip('/')}:{port}"
+        logger.info(f"FiftyOne app URL (FIFTYONE_APP_PUBLIC_BASE_URL): {app_url}")
 
-        return {
+        result = {
             "status": "ok",
             "dataset_name": dataset_name,
             "database_name": resolved_db,
             "sample_count": sample_count,
-            "saved_media_dir": tmp_dir or None,
+            "saved_media_dir": dl_dir or None,
             "saved_localizations_path": localizations_path or None,
-            "saved_crops_dir": crops_dir or None,
+            "saved_crops_dir": crops or None,
         }
+        if app_url is not None:
+            result["app_url"] = app_url
+        result["port"] = port
+        return result
     finally:
         release_sync_lock(lock_key)
 
@@ -1517,7 +1533,6 @@ def main() -> None:
     version_id_str = os.getenv("VERSION_ID", "").strip()
     version_id = int(version_id_str) if version_id_str else None
 
-    project_name_cli = None
     try:
         project_name_cli = getattr(api.get_project(project_id), "name", None) or str(project_id)
     except Exception:
@@ -1530,26 +1545,24 @@ def main() -> None:
 
     # Fetch localizations first (cheap metadata)
     localizations_path = fetch_and_save_localizations(
-        api, port, project_id, version_id=version_id, media_ids=media_ids if media_ids else None
+        api, project_id, version_id=version_id, media_ids=media_ids if media_ids else None
     )
     if localizations_path:
         logger.info("saved_localizations_path (JSONL): %s", localizations_path)
 
-    base_dir = _project_tmp_dir(project_id)
-    download_dir = os.path.join(base_dir, "download")
-    os.makedirs(download_dir, exist_ok=True)
-    crops_dir = os.path.join(base_dir, "crops")
+    dl_dir = _download_dir(project_id)
+    crops = _crops_dir(project_id, version_id)
 
-    # etermine cache misses
+    # Determine cache misses
     if localizations_path:
-        old_manifest = _load_crop_manifest(project_id, port)
+        old_manifest = _load_crop_manifest(project_id, version_id)
         media_ids_needed, locs_to_crop, updated_manifest = _find_crop_cache_misses(
             localizations_jsonl_path=localizations_path,
-            crops_dir=crops_dir,
+            crops_dir=crops,
             manifest=old_manifest,
-            download_dir=download_dir,
+            download_dir=dl_dir,
         )
-        _cleanup_deleted_crops(old_manifest, updated_manifest, crops_dir)
+        _cleanup_deleted_crops(old_manifest, updated_manifest, crops)
 
         # Download only media with cache misses
         if media_ids and media_ids_needed:
@@ -1565,19 +1578,19 @@ def main() -> None:
         # Crop only cache misses
         if locs_to_crop:
             crop_localizations_parallel(
-                download_dir, localizations_path, crops_dir, size=224, locs_to_crop=locs_to_crop,
+                dl_dir, localizations_path, crops, size=224, locs_to_crop=locs_to_crop,
             )
 
         # Patch manifest stems from actual downloaded filenames
-        _patch_manifest_stems(updated_manifest, download_dir)
+        _patch_manifest_stems(updated_manifest, dl_dir)
 
         # Save updated manifest
-        _save_crop_manifest(project_id, port, updated_manifest)
+        _save_crop_manifest(project_id, version_id, updated_manifest)
 
         # Remove downloaded media to reclaim disk space
         _cleanup_download_dir(project_id)
 
-    if crops_dir and localizations_path and os.path.isdir(crops_dir):
+    if crops and localizations_path and os.path.isdir(crops):
         fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name_cli)
         fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
@@ -1587,16 +1600,13 @@ def main() -> None:
         dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
         dataset = build_fiftyone_dataset_from_crops(
-            crops_dir=crops_dir,
+            crops_dir=crops,
             localizations_jsonl_path=localizations_path,
             dataset_name=dataset_name,
             config=config,
-            download_dir=download_dir,
+            download_dir=dl_dir,
         )
-        logger.info(f"Launching FiftyOne app on port {port}...")
-        _stop_process_on_port(port)
-        session = _launch_app_embedded(dataset, port)
-        logger.info(f"Session: {session}")
+        logger.info(f"Dataset built. FiftyOne app should be running in another container on port {port}.")
 
 
 if __name__ == "__main__":
