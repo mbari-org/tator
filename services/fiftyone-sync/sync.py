@@ -1586,6 +1586,7 @@ def sync_project_to_fiftyone(
                         "Embedding service unavailable; skipping embeddings/UMAP (dataset still available)"
                     )
                 else:
+                    logger.info(f"Computing embeddings and UMAP for dataset '{dataset_name}'...")
                     compute_embeddings_and_viz(
                         dataset,
                         model_info,
