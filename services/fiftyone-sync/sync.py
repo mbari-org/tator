@@ -44,8 +44,10 @@ handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
- 
-MEDIA_ID_BATCH_SIZE = 200
+
+# Fallback batch sizes when not set in config (see config.yml: media_id_batch_size, localization_batch_size)
+_DEFAULT_MEDIA_ID_BATCH_SIZE = 200
+_DEFAULT_LOCALIZATION_BATCH_SIZE = 5000
 
 
 def _test_mongodb_connection(database_uri: str, timeout_ms: int = 5000) -> None:
@@ -94,10 +96,6 @@ def _stop_process_on_port(port: int) -> None:
             logger.info(f"Stopped existing process(es) on port {port} (PIDs: {pids})")
     except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
         logging.getLogger(__name__).debug(f"Could not stop process on port {port}: {e}")
-
-
-LOCALIZATION_BATCH_SIZE = 5000
-MEDIA_ID_BATCH_SIZE = 200
 
 
 def _json_serial(obj: Any) -> Any:
@@ -175,18 +173,24 @@ def fetch_project_media_ids(
     return media_ids
 
 
-def get_media_chunked(api: Any, project_id: int, media_ids: list[int]) -> list[Any]:
+def get_media_chunked(
+    api: Any,
+    project_id: int,
+    media_ids: list[int],
+    media_id_batch_size: int | None = None,
+) -> list[Any]:
     """
-    Get media objects in chunks of MEDIA_ID_BATCH_SIZE. Uses get_media_list_by_id for reliable Media objects.
+    Get media objects in chunks. Uses get_media_list_by_id for reliable Media objects.
     Filters out non-Media responses (API quirk). Returns list of tator.models.Media.
     """
-    logger.info(f"get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={MEDIA_ID_BATCH_SIZE}")
+    chunk_size = media_id_batch_size if media_id_batch_size is not None else _DEFAULT_MEDIA_ID_BATCH_SIZE
+    logger.info(f"get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={chunk_size}")
     if not media_ids:
         logger.info("get_media_chunked: no ids, returning []")
         return []
     all_media = []
-    for start in range(0, len(media_ids), MEDIA_ID_BATCH_SIZE):
-        chunk_ids = media_ids[start : start + MEDIA_ID_BATCH_SIZE]
+    for start in range(0, len(media_ids), chunk_size):
+        chunk_ids = media_ids[start : start + chunk_size]
         media = api.get_media_list_by_id(project_id, {"ids": chunk_ids})
         new_media = [m for m in media if isinstance(m, tator.models.Media)]
         all_media += new_media
@@ -260,27 +264,30 @@ def fetch_and_save_localizations(
     project_id: int,
     version_id: int | None = None,
     media_ids: list[int] | None = None,
+    localization_batch_size: int | None = None,
+    media_id_batch_size: int | None = None,
 ) -> str:
     """
     Fetch all current localizations from Tator and write to a JSONL file.
     Overwrites the file (mode "w"), so the JSONL is always reconciled with Tator:
     removed localizations are absent, and the file is the single source of truth for the sync.
-    Returns path to the file (e.g. .../localizations.jsonl). Uses LOCALIZATION_BATCH_SIZE per batch.
+    Returns path to the file (e.g. .../localizations.jsonl).
     If media_ids is provided, only localizations for those media are fetched (required when syncing
     a subset of media; avoids empty results when project localizations are scoped to media).
 
-    Media IDs are batched into groups of MEDIA_ID_BATCH_SIZE to avoid 414 Request-URI Too Large
-    errors from nginx when the project has many media.
+    Batch sizes are from config (media_id_batch_size, localization_batch_size) or fallbacks to avoid
+    414 Request-URI Too Large errors from nginx when the project has many media.
     """
     out_path = _localizations_jsonl_path(project_id, version_id)
     logger.info(f"Localizations JSONL will be saved to: {out_path}")
-    batch_size = LOCALIZATION_BATCH_SIZE
+    loc_batch = localization_batch_size if localization_batch_size is not None else _DEFAULT_LOCALIZATION_BATCH_SIZE
+    mid_batch = media_id_batch_size if media_id_batch_size is not None else _DEFAULT_MEDIA_ID_BATCH_SIZE
 
     media_id_batches: list[list[int] | None] = (
-        [media_ids[i:i + MEDIA_ID_BATCH_SIZE] for i in range(0, len(media_ids), MEDIA_ID_BATCH_SIZE)]
+        [media_ids[i:i + mid_batch] for i in range(0, len(media_ids), mid_batch)]
         if media_ids else [None]
     )
-    logger.info(f"Media ID batches: {len(media_id_batches)} batch(es) of up to {MEDIA_ID_BATCH_SIZE}")
+    logger.info(f"Media ID batches: {len(media_id_batches)} batch(es) of up to {mid_batch}")
 
     def _version_kw() -> dict:
         return {"version": [version_id]} if version_id is not None else {}
@@ -318,7 +325,7 @@ def fetch_and_save_localizations(
             for bidx, mid_batch in enumerate(media_id_batches):
                 after_id = None
                 while True:
-                    kw = {"stop": batch_size}
+                    kw = {"stop": loc_batch}
                     if mid_batch:
                         kw["media_id"] = mid_batch
                     kw.update(_version_kw())
@@ -345,7 +352,7 @@ def fetch_and_save_localizations(
                     fetched += len(locs)
                     after_id = locs[-1].id if locs else None
                     logger.info(f"Localizations batch: count={len(locs)} total_so_far={fetched} last_id={after_id}")
-                    if len(locs) < batch_size:
+                    if len(locs) < loc_batch:
                         break
             return fetched
 
@@ -864,6 +871,7 @@ def reconcile_dataset_with_tator(
 
     # 1. Remove samples deleted in Tator (only when we have a non-empty localization set from Tator)
     # If Tator returns 0 localizations (e.g. wrong version or API filter), do not remove existing samples
+    logger.info("Reconcile: Remove samples deleted in Tator (only when we have a non-empty localization set from Tator)")
     if tator_eids:
         to_remove = []
         for s in dataset:
@@ -877,6 +885,7 @@ def reconcile_dataset_with_tator(
         logger.info(f"Reconcile: 0 localizations from Tator; skipping delete step (keeping existing samples)")
 
     # 2. Update samples with changed box (crop already overwritten by crop_localizations_parallel)
+    logger.info("Reconcile: Update samples with changed box (crop already overwritten by crop_localizations_parallel)")
     updated = 0
     for sample in dataset.iter_samples(autosave=False):
         elemental_id = sample["elemental_id"] if "elemental_id" in sample else None
@@ -1303,6 +1312,17 @@ def sync_project_to_fiftyone(
             "database_name": resolved_db,
         }
 
+    # Load config early so batch sizes apply to fetch steps (see config.yml)
+    config: dict[str, Any] = {}
+    if config_path and os.path.exists(config_path):
+        try:
+            config = _load_config(config_path)
+            logger.info(f"Loaded config from {config_path}")
+        except Exception as e:
+            logger.info(f"Failed to load config {config_path}: {e}")
+    media_id_batch_size = config.get("media_id_batch_size") or _DEFAULT_MEDIA_ID_BATCH_SIZE
+    localization_batch_size = config.get("localization_batch_size") or _DEFAULT_LOCALIZATION_BATCH_SIZE
+
     try:
         dl_dir = _download_dir(project_id)
         localizations_path = ""
@@ -1318,7 +1338,12 @@ def sync_project_to_fiftyone(
             # 2. Fetch localizations first (cheap metadata)
             logger.info("Fetching localizations...")
             localizations_path = fetch_and_save_localizations(
-                api, project_id, version_id=version_id, media_ids=media_ids_list or None
+                api,
+                project_id,
+                version_id=version_id,
+                media_ids=media_ids_list or None,
+                localization_batch_size=localization_batch_size,
+                media_id_batch_size=media_id_batch_size,
             )
             if localizations_path:
                 logger.info(f"saved_localizations_path (JSONL): {localizations_path}")
@@ -1343,7 +1368,7 @@ def sync_project_to_fiftyone(
             else:
                 needed_ids = [mid for mid in media_ids_list if mid in media_ids_needed]
                 logger.info(f"Getting {len(needed_ids)}/{len(media_ids_list)} media objects (cache misses)...")
-                all_media = get_media_chunked(api, project_id, needed_ids)
+                all_media = get_media_chunked(api, project_id, needed_ids, media_id_batch_size=media_id_batch_size)
                 if not all_media:
                     logger.info(f"No Media objects returned for {len(needed_ids)} ids; skipping download")
                 else:
@@ -1389,15 +1414,6 @@ def sync_project_to_fiftyone(
                 "saved_localizations_path": localizations_path or None,
                 "saved_crops_dir": crops or None,
             }
-
-        # Load config from YAML/JSON if provided
-        config: dict[str, Any] = {}
-        if config_path and os.path.exists(config_path):
-            try:
-                config = _load_config(config_path)
-                logger.info(f"Loaded config from {config_path}")
-            except Exception as e:
-                logger.info(f"Failed to load config {config_path}: {e}")
 
         # Inject Tator base URL and ids so sample "url" can link to the localization's media page
         config["source_url"] = api_url.rstrip("/")
@@ -1539,13 +1555,24 @@ def main() -> None:
         project_name_cli = str(project_id)
     port = get_port_for_project(project_id, project_name=project_name_cli)
 
+    # Load config early for batch sizes (see config.yml)
+    config_path_cli = os.getenv("CONFIG_PATH")
+    config_cli = _load_config(config_path_cli) if config_path_cli and os.path.exists(config_path_cli) else {}
+    media_id_batch_size_cli = config_cli.get("media_id_batch_size") or _DEFAULT_MEDIA_ID_BATCH_SIZE
+    localization_batch_size_cli = config_cli.get("localization_batch_size") or _DEFAULT_LOCALIZATION_BATCH_SIZE
+
     # Fetch media IDs (lightweight)
     media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
     logger.info("media_ids: %s", media_ids)
 
     # Fetch localizations first (cheap metadata)
     localizations_path = fetch_and_save_localizations(
-        api, project_id, version_id=version_id, media_ids=media_ids if media_ids else None
+        api,
+        project_id,
+        version_id=version_id,
+        media_ids=media_ids if media_ids else None,
+        localization_batch_size=localization_batch_size_cli,
+        media_id_batch_size=media_id_batch_size_cli,
     )
     if localizations_path:
         logger.info("saved_localizations_path (JSONL): %s", localizations_path)
@@ -1567,7 +1594,7 @@ def main() -> None:
         # Download only media with cache misses
         if media_ids and media_ids_needed:
             needed_ids = [mid for mid in media_ids if mid in media_ids_needed]
-            all_media = get_media_chunked(api, project_id, needed_ids)
+            all_media = get_media_chunked(api, project_id, needed_ids, media_id_batch_size=media_id_batch_size_cli)
             if all_media:
                 save_media_to_tmp(api, project_id, all_media, media_ids_filter=media_ids_needed)
             else:
@@ -1595,8 +1622,7 @@ def main() -> None:
         fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
         os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
-        config_path = os.getenv("CONFIG_PATH")
-        config = _load_config(config_path) if config_path and os.path.exists(config_path) else {}
+        config = config_cli
         dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
         dataset = build_fiftyone_dataset_from_crops(

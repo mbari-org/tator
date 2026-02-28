@@ -75,52 +75,68 @@ def _compute_embeddings_via_service(
         print("[embeddings] No valid image files to embed", flush=True)
         return
 
-    # Process in batches
-    all_embeddings = []
+    # Submit all batches, then poll all jobs
+    num_batches = (len(bytes_list) + batch_size - 1) // batch_size
+    jobs: list[tuple[int, str]] = []  # (batch_index, job_id)
+
     with httpx.Client(timeout=5.0) as client:
+        # Phase 1: submit every batch and collect job IDs
         for start in range(0, len(bytes_list), batch_size):
-            print(f"[embeddings] Processing batch {start // batch_size + 1} of {len(bytes_list) // batch_size}")
+            batch_idx = start // batch_size
+            print(f"[embeddings] Submitting batch {batch_idx + 1}/{num_batches}")
             batch = bytes_list[start : start + batch_size]
             files = [("files", (f"img_{i}.jpg", data)) for i, data in enumerate(batch)]
             url = f"{base}/embed/{project_name}"
             resp = client.post(url, files=files)
             resp.raise_for_status()
             data = resp.json()
-            print(f"[embeddings] Response: {data}")
 
             err = data.get("error")
             if err:
-                print(f"[embeddings] Embed service returned error: {err}")
+                print(f"[embeddings] Embed service returned error for batch {batch_idx + 1}: {err}")
                 return
 
-            job_id = data.get("job_id", None)
-            if job_id:
-                print(f"[embeddings] Polling Job ID: {job_id}")
-                # Poll GET /predict/job/{job_id}/{project_name} until status == "done", then use result.embeddings
-                poll_url = f"{base}/predict/job/{job_id}/{project_name}"
-                deadline = time.monotonic() + poll_timeout
-                while time.monotonic() < deadline:
-                    r = client.get(poll_url)
-                    r.raise_for_status()
-                    out = r.json()
-                    print(f'[embeddings] Poll response: {out.get("status")}')
-                    if out.get("status") == "done":
-                        result = out.get("result") or {}
-                        emb = result.get("embeddings") or out.get("embeddings")
-                        if isinstance(emb, list) and len(emb) > 0:
-                            print(f"[embeddings] Embeddings: {emb}")
-                            all_embeddings.extend(
-                                emb if isinstance(emb[0], (list, tuple)) else [emb]
-                            )
-                            break
-                    time.sleep(poll_interval)
-                else:
-                    raise TimeoutError(
-                        f"Embed service did not return status=done within {poll_timeout}s"
-                    ) 
-            else:
-                print(f"[embeddings] No job_id in response (may be sync response or error above): {data}")
+            job_id = data.get("job_id")
+            if not job_id:
+                print(f"[embeddings] No job_id in response for batch {batch_idx + 1}: {data}")
                 return
+            jobs.append((batch_idx, job_id))
+            print(f"[embeddings] Batch {batch_idx + 1} submitted -> job {job_id}")
+
+        # Phase 2: poll all jobs until every one is done
+        all_embeddings: list[list] = [[] for _ in range(num_batches)]
+        pending = dict(jobs)  # batch_idx -> job_id
+        deadline = time.monotonic() + poll_timeout
+
+        while pending and time.monotonic() < deadline:
+            still_pending = {}
+            for batch_idx, job_id in pending.items():
+                poll_url = f"{base}/predict/job/{job_id}/{project_name}"
+                r = client.get(poll_url)
+                r.raise_for_status()
+                out = r.json()
+                status = out.get("status")
+                if status == "done":
+                    result = out.get("result") or {}
+                    emb = result.get("embeddings") or out.get("embeddings")
+                    if isinstance(emb, list) and len(emb) > 0:
+                        all_embeddings[batch_idx] = (
+                            emb if isinstance(emb[0], (list, tuple)) else [emb]
+                        )
+                    print(f"[embeddings] Batch {batch_idx + 1} done ({len(all_embeddings[batch_idx])} vectors)")
+                else:
+                    still_pending[batch_idx] = job_id
+            pending = still_pending
+            if pending:
+                print(f"[embeddings] {len(pending)}/{num_batches} batches still pending…")
+                time.sleep(poll_interval)
+
+        if pending:
+            raise TimeoutError(
+                f"Embed service: {len(pending)} batch(es) did not finish within {poll_timeout}s"
+            )
+
+    all_embeddings = [vec for batch_embs in all_embeddings for vec in batch_embs]
 
     if len(all_embeddings) != len(filepaths):
         print(
@@ -192,7 +208,7 @@ def compute_embeddings_and_viz(
     base_url = (service_url or EMBED_SERVICE_BASE_URL).rstrip("/")
 
     print(f"\n{'='*80}")
-    print("Embeddings from service:", f"{base_url}/embed/{{project_name}}")
+    print("Embeddings from service:", f"{base_url}/embed/")
     print(f"  Project name: {project_name}")
     print(f"  Embeddings field: {embeddings_field}")
     print(f"  Brain key: {brain_key}")

@@ -188,10 +188,6 @@ The Hosted Template URL is **fetched by Tator’s backend** (gunicorn), not by t
 - **If both run in Docker**
   - Put both services on the same Docker network and set the Hosted Template URL to the service name and port, e.g. `http://fiftyone-sync:8001/message`.
 
-- **Check**
-  - From the host: `curl http://localhost:8001/message` should return HTML.
-  - From inside the Tator/gunicorn container: the same URL you put in the Hosted Template (e.g. `http://host.docker.internal:8001/message`) must work (e.g. `curl` from that container).
-
 ## MongoDB (compose stack)
 
 The compose stack in **`containers/fiftyone-sync`** launches a single MongoDB for the service. **Project 1** uses database `fiftyone_project_1` by default; other projects use `fiftyone_project_2`, etc., on the same instance.
@@ -231,13 +227,16 @@ Optional query param **`database_name`** on `GET /launch` and `POST /sync` overr
 | `config_path` | no | Path to YAML/JSON config file for dataset build |
 | `launch_app` | no | Launch FiftyOne app after sync (default: true) |
 
-**Sync-from-Tator flow (dashboard):** The launcher template calls `POST /sync`, then opens the FiftyOne app in a new tab. The frontend opens the **dataset URL** (e.g. `http://host:port/datasets/MyProject_MyVersion`) using `dataset_name` from the response so the App loads the synced dataset directly. The default dataset name is `get_project(project_id).name + "_" + version_name` (from the Tator API). A short delay (~1.2s) before opening gives the FiftyOne server time to serve the correct session state ([Session lifecycle](https://docs.voxel51.com/api/fiftyone.core.session.session.html)). After launch we call `session.refresh()` so the first client connection receives the current dataset.
+**Sync-from-Tator flow (dashboard):** The launcher template calls `POST /sync`, then opens the FiftyOne app in a new tab. The frontend opens the **dataset URL** (e.g. `http://host:port/datasets/MyProject_MyVersion`) using `dataset_name` from the response so the App loads the synced dataset directly. The default dataset name is `get_project(project_id).name + "_" + version_name` (from the Tator API).
 
 ### Config file (YAML/JSON)
 
 Use `config_path` to pass a config file path:
 
 ```yaml
+media_id_batch_size: 200              # chunk size for get_media_list_by_id
+localization_batch_size: 5000         # page size for localization list API
+
 dataset_name: tator_project_dataset
 include_classes: [Larvacean, Copepod]   # optional: filter labels
 image_extensions: ["*.png", "*.jpg"]

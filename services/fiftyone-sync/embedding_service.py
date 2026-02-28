@@ -47,7 +47,6 @@ def is_embedding_service_available() -> bool:
 
 async def queue_embedding_job(
     image_bytes_list: list[bytes],
-    cache_keys: list[str | None] | None = None,
     project: str = "default",
 ) -> str:
     """

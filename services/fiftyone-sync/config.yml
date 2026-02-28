@@ -1,3 +1,18 @@
+# Batch sizes (fallbacks in code: media_id 200, localization 5000, embeddings 32)
+media_id_batch_size: 200
+localization_batch_size: 5000
+
+# Optional: embeddings and UMAP; batch_size is per-request size for embed service
+# embeddings:
+#   batch_size: 32
+#   embeddings_field: embeddings
+#   brain_key: umap_viz
+#   umap_seed: 51
+#   force_embeddings: false
+#   force_umap: false
+#   service_url: null
+#   project_name: null
+
 # Example: per-project MongoDB URI and FiftyOne app port mapping.
 # See containers/fiftyone-sync for the compose stack.
 # projects:
