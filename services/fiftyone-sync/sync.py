@@ -1077,7 +1077,8 @@ def build_fiftyone_dataset_from_crops(
     crops_dir: str,
     localizations_jsonl_path: str,
     dataset_name: str,
-    config: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None,
+    download_dir: str | None = None,
 ) -> Any:
     """
     Build a FiftyOne dataset from crop images and localizations JSONL.
