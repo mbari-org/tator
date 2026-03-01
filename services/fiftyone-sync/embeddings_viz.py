@@ -11,12 +11,9 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
-logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    import fiftyone as fo
+logger = logging.getLogger(__name__) 
 
 # Base URL for embed service (POST /embed/{project} no trailing slash, GET /predict/job/{job_id}/{project})
 EMBED_SERVICE_BASE_URL = os.environ.get("FASTVSS_API_URL", "http://cortext.shore.mbari.org/vss").rstrip("/")
@@ -50,11 +47,8 @@ def _compute_embeddings_via_service(
              then GET {service_url}/predict/job/{job_id}/{project_name} until embeddings returned.
     """
     import fiftyone as fo
-
-    try:
-        import httpx
-    except ImportError:
-        raise ImportError("Embeddings via service require httpx. Install with: pip install httpx") from None
+    import httpx
+    import numpy as np
 
     base = service_url.rstrip("/")
     samples = list(dataset.iter_samples(autosave=False))
@@ -72,7 +66,7 @@ def _compute_embeddings_via_service(
 
     # Submit all batches, then poll all jobs
     num_batches = (len(filepaths) + batch_size - 1) // batch_size
-    jobs: list[tuple[int, str]] = []  # (batch_index, job_id)
+    jobs: list[tuple[int, str]] = [] 
 
     logger.info(f"Num batches {num_batches}")
     with httpx.Client(timeout=5.0) as client:
@@ -141,11 +135,7 @@ def _compute_embeddings_via_service(
         logger.warning(f"Got {len(all_embeddings)} embeddings for {len(filepaths)} images")
 
     # Map back to samples by filepath; store as 1D numpy arrays so FiftyOne infers VectorField
-    # (list of floats infers ListField, which brain/UMAP may not treat as embeddings)
-    try:
-        import numpy as np
-    except ImportError:
-        np = None
+    # (list of floats infers ListField, which brain/UMAP may not treat as embeddings) 
     fp_to_emb = dict(zip(filepaths, all_embeddings))
     if np is not None:
         # Bulk set via set_values so schema expands to VectorField; use sample id as key
