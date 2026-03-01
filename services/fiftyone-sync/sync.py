@@ -188,18 +188,22 @@ def fetch_project_media_ids(
     token: str,
     project_id: int,
     media_ids_filter: list[int] | None = None,
+    version_id: int | None = None,
 ) -> list[int]:
     """
     Fetch all media in the project. Returns list of media ids.
     If media_ids_filter is set, only those media are returned (and must exist in the project).
+    If version_id is set, filters media by that version via related_attribute.
     """
-    logger.info(f"fetch_project_media_ids: project_id={project_id} filter={media_ids_filter}")
+    logger.info(f"fetch_project_media_ids: project_id={project_id} filter={media_ids_filter} version_id={version_id}")
     host = api_url.rstrip("/")
     api = tator.get_api(host, token)
+    kwargs: dict = {}
+    if version_id is not None:
+        kwargs["related_attribute"] = [f"$version::{version_id}"]
     if media_ids_filter:
-        media_list = api.get_media_list(project_id, media_id=media_ids_filter)
-    else:
-        media_list = api.get_media_list(project_id)
+        kwargs["media_id"] = media_ids_filter
+    media_list = api.get_media_list(project_id, **kwargs)
     media_ids = [m.id for m in media_list]
     logger.info(f"Project {project_id} media count: {len(media_ids)}")
     return media_ids
@@ -1450,7 +1454,7 @@ def sync_project_to_fiftyone(
             if not use_cached_jsonl:
                 # 1. Fetch media IDs (lightweight metadata, needed for localization query)
                 logger.info(f"Fetching media IDs... host={host} project_id={project_id} api_url={api_url}")
-                media_ids_list = fetch_project_media_ids(api_url, token, project_id)
+                media_ids_list = fetch_project_media_ids(api_url, token, project_id, version_id=version_id)
 
                 # 2. Fetch localizations first (cheap metadata)
                 logger.info("Fetching localizations...")
@@ -1694,7 +1698,7 @@ def main() -> None:
     localization_batch_size_cli = config_cli.get("localization_batch_size") or _DEFAULT_LOCALIZATION_BATCH_SIZE
 
     # Fetch media IDs (lightweight)
-    media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter)
+    media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter, version_id=version_id)
     logger.info(f"media_ids: {media_ids}")
 
     # Fetch localizations first (cheap metadata)
