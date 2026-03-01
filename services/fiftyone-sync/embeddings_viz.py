@@ -18,6 +18,9 @@ logger = logging.getLogger(__name__)
 # Base URL for embed service (POST /embed/{project} no trailing slash, GET /predict/job/{job_id}/{project})
 EMBED_SERVICE_BASE_URL = os.environ.get("FASTVSS_API_URL", "http://cortext.shore.mbari.org/vss").rstrip("/")
 
+# Stop embedding run after this many failed fetch attempts
+EMBEDDING_FETCH_MAX_RETRIES = 3
+
 
 def has_embeddings(dataset: "fo.Dataset", embeddings_field: str) -> bool:
     """Return True if the dataset has the embeddings field and at least one sample has embeddings."""
@@ -66,37 +69,48 @@ def _compute_embeddings_via_service(
 
     # Submit all batches, then poll all jobs
     num_batches = (len(filepaths) + batch_size - 1) // batch_size
-    jobs: list[tuple[int, str]] = [] 
+    jobs: list[tuple[int, str]] = []
 
     logger.info(f"Num batches {num_batches}")
     with httpx.Client(timeout=5.0) as client:
-        # Phase 1: submit every batch and collect job IDs
+        # Phase 1: submit every batch and collect job IDs (retry each batch up to EMBEDDING_FETCH_MAX_RETRIES)
         for start in range(0, len(filepaths), batch_size):
             batch_idx = start // batch_size
-            logger.info(f"Submitting batch {batch_idx + 1}/{num_batches}")
             batch_paths = filepaths[start : start + batch_size]
             files = []
             for i, fp in enumerate(batch_paths):
                 with open(fp, "rb") as f:
                     files.append(("files", (f"img_{i}.jpg", f.read())))
             url = f"{base}/embed/{project_name}"
-            resp = client.post(url, files=files)
-            resp.raise_for_status()
-            data = resp.json()
+            last_error = None
+            for attempt in range(EMBEDDING_FETCH_MAX_RETRIES):
+                try:
+                    logger.info(f"Submitting batch {batch_idx + 1}/{num_batches}" + (f" (attempt {attempt + 1}/{EMBEDDING_FETCH_MAX_RETRIES})" if attempt else ""))
+                    resp = client.post(url, files=files)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    err = data.get("error")
+                    if err:
+                        raise RuntimeError(f"Embed service error: {err}")
+                    job_id = data.get("job_id")
+                    if not job_id:
+                        raise RuntimeError(f"No job_id in response: {data}")
+                    jobs.append((batch_idx, job_id))
+                    logger.info(f"Batch {batch_idx + 1} submitted -> job {job_id}")
+                    last_error = None
+                    break
+                except Exception as e:
+                    last_error = e
+                    logger.warning(f"Batch {batch_idx + 1} submit attempt {attempt + 1}/{EMBEDDING_FETCH_MAX_RETRIES} failed: {e}")
+            if last_error is not None:
+                logger.error(
+                    f"Embedding service failed after {EMBEDDING_FETCH_MAX_RETRIES} retries; stopping to avoid continuing for thousands of images. Last error: {last_error}"
+                )
+                raise RuntimeError(
+                    f"Embedding fetch failed after {EMBEDDING_FETCH_MAX_RETRIES} retries: {last_error}"
+                ) from last_error
 
-            err = data.get("error")
-            if err:
-                logger.error(f"Embed service returned error for batch {batch_idx + 1}: {err}")
-                return
-
-            job_id = data.get("job_id")
-            if not job_id:
-                logger.error(f"No job_id in response for batch {batch_idx + 1}: {data}")
-                return
-            jobs.append((batch_idx, job_id))
-            logger.info(f"Batch {batch_idx + 1} submitted -> job {job_id}")
-
-        # Phase 2: poll all jobs until every one is done
+        # Phase 2: poll all jobs until every one is done (retry each poll up to EMBEDDING_FETCH_MAX_RETRIES)
         all_embeddings: list[list] = [[] for _ in range(num_batches)]
         pending = dict(jobs)  # batch_idx -> job_id
         deadline = time.monotonic() + poll_timeout
@@ -105,20 +119,40 @@ def _compute_embeddings_via_service(
             still_pending = {}
             for batch_idx, job_id in pending.items():
                 poll_url = f"{base}/predict/job/{job_id}/{project_name}"
-                r = client.get(poll_url)
-                r.raise_for_status()
-                out = r.json()
-                status = out.get("status")
-                if status == "done":
-                    result = out.get("result") or {}
-                    emb = result.get("embeddings") or out.get("embeddings")
-                    if isinstance(emb, list) and len(emb) > 0:
-                        all_embeddings[batch_idx] = (
-                            emb if isinstance(emb[0], (list, tuple)) else [emb]
+                last_poll_error = None
+                for attempt in range(EMBEDDING_FETCH_MAX_RETRIES):
+                    try:
+                        r = client.get(poll_url)
+                        r.raise_for_status()
+                        out = r.json()
+                        status = out.get("status")
+                        if status == "failed":
+                            err = out.get("error", "unknown")
+                            raise RuntimeError(f"Job failed: {err}")
+                        if status == "done":
+                            result = out.get("result") or {}
+                            emb = result.get("embeddings") or out.get("embeddings")
+                            if isinstance(emb, list) and len(emb) > 0:
+                                all_embeddings[batch_idx] = (
+                                    emb if isinstance(emb[0], (list, tuple)) else [emb]
+                                )
+                            logger.info(f"Batch {batch_idx + 1} done ({len(all_embeddings[batch_idx])} vectors)")
+                        else:
+                            still_pending[batch_idx] = job_id
+                        last_poll_error = None
+                        break
+                    except Exception as e:
+                        last_poll_error = e
+                        logger.warning(
+                            f"Poll batch {batch_idx + 1} attempt {attempt + 1}/{EMBEDDING_FETCH_MAX_RETRIES} failed: {e}"
                         )
-                    logger.info(f"Batch {batch_idx + 1} done ({len(all_embeddings[batch_idx])} vectors)")
-                else:
-                    still_pending[batch_idx] = job_id
+                if last_poll_error is not None:
+                    logger.error(
+                        f"Embedding service poll failed after {EMBEDDING_FETCH_MAX_RETRIES} retries; stopping to avoid continuing for thousands of images. Last error: {last_poll_error}"
+                    )
+                    raise RuntimeError(
+                        f"Embedding fetch failed after {EMBEDDING_FETCH_MAX_RETRIES} poll retries: {last_poll_error}"
+                    ) from last_poll_error
             pending = still_pending
             if pending:
                 logger.info(f"{len(pending)}/{num_batches} batches still pending…")
