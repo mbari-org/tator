@@ -74,6 +74,7 @@ def _compute_embeddings_via_service(
     num_batches = (len(filepaths) + batch_size - 1) // batch_size
     jobs: list[tuple[int, str]] = []  # (batch_index, job_id)
 
+    logger.info(f"Num batches {num_batches}")
     with httpx.Client(timeout=5.0) as client:
         # Phase 1: submit every batch and collect job IDs
         for start in range(0, len(filepaths), batch_size):

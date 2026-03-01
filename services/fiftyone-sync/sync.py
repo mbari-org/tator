@@ -272,6 +272,63 @@ def get_media_chunked(
     return all_media
 
 
+def _get_image_media_type_and_attr_names(api: Any, project_id: int) -> tuple[int | None, list[str]]:
+    """
+    Get the Image media type id and its attribute names from the project.
+    Image media will always have the name "Image". Returns (image_type_id, attr_names) or (None, []).
+    """
+    try:
+        media_types = api.get_media_type_list(project_id)
+    except Exception as e:
+        logger.info(f"get_media_type_list failed: {e}")
+        return (None, [])
+    for mt in media_types or []:
+        name = getattr(mt, "name", None) or (mt.get("name") if isinstance(mt, dict) else None)
+        if name != "Image":
+            continue
+        type_id = getattr(mt, "id", None) or (mt.get("id") if isinstance(mt, dict) else None)
+        attr_types = getattr(mt, "attribute_types", None) or (mt.get("attribute_types") if isinstance(mt, dict) else None) or []
+        attr_names = []
+        for at in attr_types:
+            n = getattr(at, "name", None) if not isinstance(at, dict) else at.get("name")
+            if n:
+                attr_names.append(str(n))
+        logger.info(f"Image media type id={type_id} attribute_names={attr_names}")
+        return (type_id, attr_names)
+    logger.info("No media type named 'Image' in project; skipping media attributes")
+    return (None, [])
+
+
+def _build_media_attributes_map(
+    api: Any,
+    project_id: int,
+    localizations_path: str,
+    media_id_batch_size: int | None = None,
+) -> dict[int, dict[str, Any]]:
+    """
+    Build media_id -> {attr_name: value} for Image media only, using project Image type schema.
+    Returns empty dict if no Image type or no media.
+    """
+    image_type_id, attr_names = _get_image_media_type_and_attr_names(api, project_id)
+    if image_type_id is None or not attr_names:
+        return {}
+    _, media_ids = _localizations_jsonl_line_count_and_media_ids(localizations_path)
+    if not media_ids:
+        return {}
+    all_media = get_media_chunked(api, project_id, media_ids, media_id_batch_size=media_id_batch_size)
+    result: dict[int, dict[str, Any]] = {}
+    for m in all_media:
+        if getattr(m, "type", None) != image_type_id:
+            continue
+        mid = getattr(m, "id", None)
+        if mid is None:
+            continue
+        attrs = getattr(m, "attributes", None) or {}
+        result[mid] = {k: attrs[k] for k in attr_names if k in attrs and attrs[k] is not None}
+    logger.info(f"Media attributes map: {len(result)} Image media with attributes")
+    return result
+
+
 # Video extensions: skip download (not supported); downloads come directly from Tator for images only.
 VIDEO_EXTENSIONS = (".mp4", ".mov", ".avi", ".webm", ".mkv", ".m4v")
 
@@ -1020,8 +1077,7 @@ def build_fiftyone_dataset_from_crops(
     crops_dir: str,
     localizations_jsonl_path: str,
     dataset_name: str,
-    config: dict[str, Any] | None = None,
-    download_dir: str | None = None,
+    config: dict[str, Any] | None = None
 ) -> Any:
     """
     Build a FiftyOne dataset from crop images and localizations JSONL.
@@ -1087,6 +1143,15 @@ def build_fiftyone_dataset_from_crops(
                     sample["confidence"] = float(score)
             conf = sample["confidence"] if "confidence" in sample else 1.0
             sample["last_sync_hash"] = _content_hash(label, conf)
+            # Media-level attributes (Image type only), if provided in config
+            media_attrs_map = config.get("media_attributes_map") or {}
+            if loc:
+                media_id = loc.get("media")
+                if media_id is not None:
+                    media_attrs = media_attrs_map.get(int(media_id)) or {}
+                    for k, v in media_attrs.items():
+                        if v is not None:
+                            sample[k] = v
             samples.append(sample)
         if max_samples and len(samples) >= max_samples:
             break
@@ -1519,6 +1584,11 @@ def sync_project_to_fiftyone(
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
         os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
+        # Media attributes (Image type only) for dataset samples
+        config["media_attributes_map"] = _build_media_attributes_map(
+            api, project_id, localizations_path, media_id_batch_size=media_id_batch_size,
+        )
+
         try:
             logger.info(f"Building dataset {dataset_name}")
             dataset = build_fiftyone_dataset_from_crops(
@@ -1586,14 +1656,15 @@ def sync_project_to_fiftyone(
                         "Embedding service unavailable; skipping embeddings/UMAP (dataset still available)"
                     )
                 else:
-                    logger.info(f"Computing embeddings and UMAP for dataset '{dataset_name}'...")
+                    batch_size = embeddings_config.get("batch_size", 32)
+                    logger.info(f"Computing embeddings with batch size {batch_size} and UMAP for dataset '{dataset_name}'...")
                     compute_embeddings_and_viz(
                         dataset,
                         model_info,
                         umap_seed=int(embeddings_config.get("umap_seed", 51)),
                         force_embeddings=bool(embeddings_config.get("force_embeddings", False)),
                         force_umap=bool(embeddings_config.get("force_umap", False)),
-                        batch_size=embeddings_config.get("batch_size"),
+                        batch_size=batch_size,
                         project_name=vss_project,
                         service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
                     )
@@ -1723,9 +1794,12 @@ def main() -> None:
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
         os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
         config = config_cli
+        config["media_attributes_map"] = _build_media_attributes_map(
+            api, project_id, localizations_path, media_id_batch_size=media_id_batch_size_cli,
+        )
         dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
-        dataset = build_fiftyone_dataset_from_crops(
+        build_fiftyone_dataset_from_crops(
             crops_dir=crops,
             localizations_jsonl_path=localizations_path,
             dataset_name=dataset_name,
