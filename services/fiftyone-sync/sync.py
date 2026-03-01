@@ -68,36 +68,7 @@ def _test_mongodb_connection(database_uri: str, timeout_ms: int = 5000) -> None:
     finally:
         client.close()
 
-
-def _stop_process_on_port(port: int) -> None:
-    """
-    Try to stop any process listening on the given port (e.g. so another
-    process can bind to it). Used by the CLI when re-running sync.
-    """
-    if sys.platform not in ("darwin", "linux", "linux2"):
-        return
-    try:
-        out = subprocess.run(
-            ["lsof", "-ti", f":{port}"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if out.returncode != 0 or not out.stdout or not out.stdout.strip():
-            return
-        pids = [p.strip() for p in out.stdout.strip().split() if p.strip()]
-        for pid in pids:
-            try:
-                subprocess.run(["kill", "-TERM", pid], capture_output=True, timeout=2)
-            except Exception:
-                pass
-        if pids:
-            time.sleep(1.5)
-            logger.info(f"Stopped existing process(es) on port {port} (PIDs: {pids})")
-    except (FileNotFoundError, subprocess.TimeoutExpired, Exception) as e:
-        logging.getLogger(__name__).debug(f"Could not stop process on port {port}: {e}")
-
-
+ 
 def _json_serial(obj: Any) -> Any:
     """Convert datetime/date to epoch seconds (float) for JSON serialization."""
     if isinstance(obj, datetime):
@@ -108,17 +79,6 @@ def _json_serial(obj: Any) -> Any:
 
 
 _SYNC_BASE = os.environ.get("FIFTYONE_SYNC_BASE", "/tmp/fiftyone_sync")
-
-
-def _project_tmp_dir(project_id: int) -> str:
-    """Return a project-isolated directory under /tmp for synced media.
-
-    .. deprecated:: Use the specialized helpers (_download_dir, _data_dir,
-       _crops_dir, _localizations_jsonl_path) instead.
-    """
-    path = os.path.join("/tmp", f"fiftyone_sync_project_{project_id}")
-    os.makedirs(path, exist_ok=True)
-    return path
 
 
 def _version_slug(version_id: int | None) -> str:
