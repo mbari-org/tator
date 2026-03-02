@@ -768,12 +768,10 @@ async def sync(
     s3_prefix: str | None = Query(None, description="Optional S3 prefix (folder) for raw image upload"),
 ) -> dict:
     """
-    Trigger sync: fetch Tator media + localizations, build FiftyOne dataset, launch App.
-    When Redis is configured (REDIS_HOST or REDIS_URL), enqueues the job and returns
-    job_id immediately; poll GET /sync/status/{job_id} for progress. Otherwise runs
-    sync inline (can block for a long time on large projects).
+    Trigger sync: enqueues a job to fetch Tator media + localizations, build FiftyOne dataset, launch App.
+    Returns job_id immediately; poll GET /sync/status/{job_id} for progress. Requires Redis (REDIS_HOST or REDIS_URL).
     """
-    from sync_queue import is_queue_available, enqueue_sync
+    from sync_queue import enqueue_sync
 
     project_name: str | None = None
     try:
@@ -785,78 +783,41 @@ async def sync(
         logger.warning(f"get_project({project_id}) failed: {e}")
     if not project_name or not project_name.strip():
         project_name = str(project_id)
-    project_name = project_name.strip() 
+    project_name = project_name.strip()
     logger.info(f"project_id={project_id} project_name={project_name!r} -> port={port}")
     api_url_clean = _resolve_api_url(api_url)
     database_entry = get_database_entry(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
 
-    if is_queue_available():
-        try:
-            job_id = enqueue_sync(
-                project_id=project_id,
-                version_id=version_id,
-                api_url=api_url_clean,
-                token=token,
-                port=database_entry.port,
-                project_name=project_name,
-                database_name=database_name_from_uri(database_entry.uri),
-                config_path=config_path,
-                launch_app=launch_app,
-                force_sync=force_sync,
-                s3_bucket=s3_bucket,
-                s3_prefix=s3_prefix,
-            )
-            return {"job_id": job_id, "status": "queued", "port": port}
-        except Exception as e:
-            logger.warning(f"Redis unavailable, falling back to inline sync: {e}")
-    # No Redis (or Redis unreachable): run inline (blocking; may be slow for large projects)
-    from sync import sync_project_to_fiftyone
     try:
-      result = sync_project_to_fiftyone(
-          project_id=project_id,
-          version_id=version_id,
-          api_url=api_url_clean,
-          token=token,
-          port=port,
-          database_uri=database_entry.uri,
-          database_name=database_name_from_uri(database_entry.uri),
-          config_path=config_path,
-          launch_app=launch_app,
-          force_sync=force_sync,
-          s3_bucket=s3_bucket,
-          s3_prefix=s3_prefix,
-      )
-      if result.get("status") == "busy":
-          raise HTTPException(
-              status_code=409,
-              detail=result.get(
-                  "message",
-                  "This dataset is being updated by another sync. Please try again in a few minutes.",
-              ),
-          )
-      if result.get("status") == "error":
-          raise HTTPException(
-              status_code=503,
-              detail=result.get("message", "Sync failed"),
-          )
-      result["port"] = port
-      return result
+        job_id = enqueue_sync(
+            project_id=project_id,
+            version_id=version_id,
+            api_url=api_url_clean,
+            token=token,
+            port=database_entry.port,
+            project_name=project_name,
+            database_name=database_name_from_uri(database_entry.uri),
+            config_path=config_path,
+            launch_app=launch_app,
+            force_sync=force_sync,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+        )
+        return {"job_id": job_id, "status": "queued", "port": port}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}") from e
 
 
 @app_launch.get("/sync/status/{job_id}")
 async def sync_status(job_id: str) -> dict:
     """
     Poll status of an enqueued sync job. Returns status (queued|started|finished|failed),
-    and when finished: result (port, dataset_name, sample_count, etc.) or error.
+    and when finished: result (port, dataset_name, sample_count, etc.) or error. Requires Redis.
     """
-    from sync_queue import is_queue_available, get_job_status
+    from sync_queue import get_job_status
 
-    if not is_queue_available():
-        raise HTTPException(status_code=503, detail="Redis not configured; no job queue")
     try:
         return get_job_status(job_id)
     except Exception as e:

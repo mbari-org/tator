@@ -21,13 +21,13 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
   - `GET /message` - Minimal template with single `{{ message }}` (for simple Hosted Template testing)
   - `GET /render` - Launcher template with **Open FiftyOne** (opens app in new window) and **Sync from Tator** (tparams: project, iframe_host, base_port, sync_service_url, api_url; user enters API token in the applet and clicks "Test token" to enable sync)
   - `GET /launch` - Allocate port, return FiftyOne App URL
-  - `POST /sync` - Trigger Tator-to-FiftyOne sync: fetch media + localizations, crop, build FiftyOne dataset, launch app (requires fiftyone + tator). When Redis is configured, the job is **queued** and the UI stays responsive; poll `GET /sync/status/{job_id}` for completion.
-  - `GET /sync/status/{job_id}` - Poll status of a queued sync job (when using Redis).
+  - `POST /sync` - Enqueue Tator-to-FiftyOne sync (requires Redis): fetch media + localizations, crop, build FiftyOne dataset, launch app. Returns `job_id` immediately; poll `GET /sync/status/{job_id}` for completion.
+  - `GET /sync/status/{job_id}` - Poll status of a queued sync job.
   - `POST /sync-to-tator` - Push FiftyOne dataset edits (labels, confidence) back to Tator localizations
   - `GET /versions` - Return Tator versions for a project (query params: `project_id`, `api_url`; token via `Authorization: Token <token>` header only)
   - FiftyOne opens in a **new browser tab** (not in an iframe). Set **`iframe_host`** to the host where the FiftyOne app runs so the Open FiftyOne URL is correct (e.g. same host as Tator or `localhost`).
 
-- **Background sync (Redis)**: For projects with millions of localizations, sync can run for a long time. To avoid blocking the web UI, use the **Redis queue** (same as the Tator compose stack). Set `REDIS_HOST=redis` (or your Redis host) for the API; run the sync worker with the same Redis and env (MongoDB, etc.): `python sync_worker.py`. The launcher will then enqueue sync on click and poll until the worker finishes. Redis env: `REDIS_HOST`, `REDIS_PORT` (default `6379`), `REDIS_PASSWORD`, `REDIS_USE_SSL`; or a single `REDIS_URL` (e.g. `redis://host:6380/0`).
+- **Sync queue (Redis required)**: Sync runs in a background worker. Set `REDIS_HOST=redis` (or your Redis host) for the API; run the sync worker with the same Redis and env (MongoDB, etc.): `python sync_worker.py`. The launcher enqueues sync on click and polls until the worker finishes. Redis env: `REDIS_HOST`, `REDIS_PORT` (default `6379`), `REDIS_PASSWORD`, `REDIS_USE_SSL`; or a single `REDIS_URL` (e.g. `redis://host:6380/0`).
 
 ## Run (Docker)
 
@@ -66,22 +66,11 @@ pip install -e ../../scripts/packages/tator-py
 
 ## Testing
 
-### 1. Without Redis (inline sync)
+Sync requires Redis and a running sync worker.
 
-- **Docker**: `docker compose -f containers/fiftyone-sync/compose.yaml up -d` (API at http://localhost:8001).
-- **Development**: Start MongoDB only (`docker compose -f containers/fiftyone-sync/compose.yaml up -d mongo`), then run the API locally (see **Development** above).
-- In Tator, open a project that has the FiftyOne applet, then click **Sync from Tator**. The request runs to completion (may block a long time on large projects); when done, FiftyOne opens.
-- Or call the API directly (replace with your project id, API URL, token):
+### Setup
 
-```bash
-curl -X POST "http://localhost:8001/sync?project_id=1&api_url=https://your-tator.example.com&token=YOUR_TOKEN"
-```
-
-Response is the full sync result (no `job_id`).
-
-### 2. With Redis (queued sync)
-
-**Docker**: Add `REDIS_HOST=redis` (and network to Tator’s Redis) or run Redis and set `REDIS_HOST` in `containers/fiftyone-sync/.env`. Run the sync worker in a separate container or on the host with the same env.
+**Docker**: Use `REDIS_HOST=redis` (and network to Tator’s Redis) or run Redis and set `REDIS_HOST` in `containers/fiftyone-sync/.env`. Run the sync worker in a separate container or on the host with the same env.
 
 **Development**:
 
@@ -108,7 +97,7 @@ Response is the full sync result (no `job_id`).
    ```bash
    curl -X POST "http://localhost:8001/sync?project_id=1&api_url=https://your-tator.example.com&token=YOUR_TOKEN"
    ```
-   Response should be `{"job_id":"...", "status":"queued", "port":...}`.
+   Response is `{"job_id":"...", "status":"queued", "port":...}`.
 
 5. **Poll status** (replace `JOB_ID` with the returned `job_id`):
    ```bash
@@ -118,10 +107,7 @@ Response is the full sync result (no `job_id`).
 
 6. In the **browser**, after clicking **Sync from Tator** you should see “Sync queued…”, then “Sync in progress…”, then “Sync done. Opening FiftyOne…” without the tab freezing.
 
-### 3. Status endpoint without Redis
-
-If Redis is not configured, `GET /sync/status/{job_id}` returns 503 (no queue). That’s expected when not using the worker.
-
+ That’s 
 ## Hosted Template applet (recommended)
 
 This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template and renders it with template parameters. The dashboard shows **Open FiftyOne** (opens the app in a new tab) and sync controls (when sync_service_url and api_url are set). Users enter their Tator API token in the applet and click **Test token** to verify it; the Version dropdown and **Sync from Tator** / **Sync to Tator** buttons then become enabled.

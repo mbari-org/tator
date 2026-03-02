@@ -25,10 +25,14 @@ localization_batch_size: 5000
 #       - uri: "mongodb://localhost:27018"
 #         port: 5152
 #   #
-# Multi-project aexample (optional second Mongo per project) with a link to the VSS service to compute embeddings:
+# Multi-project example (optional second Mongo per project) with a link to the VSS service to compute embeddings.
+# Optional per-project: s3_bucket and s3_prefix for raw image upload (sync download dir to S3, then build dataset by class from S3).
+# When set, the applet shows S3 bucket/prefix fields (only when token is valid). Use AWS credentials (env or IAM) for upload.
 projects:
   "901902-uavs":
     vss_project: "500055-VARS"
+    # s3_bucket: "my-bucket"
+    # s3_prefix: "fiftyone/raw"
     databases:
       - uri: "mongodb://localhost:27017"
         port: 5151

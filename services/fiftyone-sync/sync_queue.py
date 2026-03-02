@@ -1,5 +1,5 @@
 """
-Redis queue for FiftyOne sync jobs. When REDIS_HOST (or REDIS_URL) is set,
+Redis queue for FiftyOne sync jobs. Redis is required (REDIS_HOST or REDIS_URL).
 POST /sync enqueues a job and returns immediately; a separate RQ worker runs
 the long-running sync. Compatible with the Tator compose stack (redis service).
 """
@@ -12,14 +12,14 @@ from typing import Any
 QUEUE_NAME = "fiftyone_sync"
 
 
-def _get_redis_url() -> str | None:
-    """Return Redis URL if queue is configured."""
+def _get_redis_url() -> str:
+    """Return Redis URL. Raises RuntimeError if not configured."""
     url = os.environ.get("REDIS_URL", "").strip()
     if url:
         return url
     host = os.environ.get("REDIS_HOST", "").strip()
     if not host:
-        return None
+        raise RuntimeError("Redis not configured (set REDIS_HOST or REDIS_URL)")
     port = os.environ.get("REDIS_PORT", "6379")
     password = os.environ.get("REDIS_PASSWORD", "")
     use_ssl = os.environ.get("REDIS_USE_SSL", "false").lower() == "true"
@@ -29,21 +29,14 @@ def _get_redis_url() -> str | None:
     return f"{scheme}://{host}:{port}/0"
 
 
-def is_queue_available() -> bool:
-    """True if Redis is configured so we can enqueue sync jobs."""
-    return _get_redis_url() is not None
-
-
 def get_connection():
-    """Redis connection for RQ. Use when queue is available."""
+    """Redis connection for RQ. Raises if Redis is not configured or unavailable."""
     from redis import Redis
     from redis.backoff import ExponentialBackoff
     from redis.retry import Retry
     from redis.exceptions import BusyLoadingError, ConnectionError, TimeoutError
 
     url = _get_redis_url()
-    if not url:
-        raise RuntimeError("Redis not configured (set REDIS_HOST or REDIS_URL)")
     retry = Retry(ExponentialBackoff(), 3)
     return Redis.from_url(
         url,
@@ -69,8 +62,7 @@ def enqueue_sync(
     s3_prefix: str | None = None,
 ) -> str:
     """
-    Enqueue a sync job. Returns RQ job id.
-    Caller must check is_queue_available() first.
+    Enqueue a sync job. Returns RQ job id. Requires Redis.
     project_name is used by the worker to resolve get_database_uri(project_id, port).
     """
     from rq import Queue

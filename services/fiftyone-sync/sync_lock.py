@@ -1,29 +1,24 @@
 """
 Mutex for FiftyOne sync: only one sync may update a given dataset at a time.
-Uses Redis when available (works across RQ workers); otherwise in-process locks.
+Uses Redis (required). Set REDIS_HOST or REDIS_URL.
 """
 
 from __future__ import annotations
 
 import os
-import threading
 
 LOCK_KEY_PREFIX = "fiftyone_sync_lock"
 DEFAULT_TTL_SECONDS = 7200  # 2h max hold so crashed workers don't lock forever
 
-# In-memory fallback when Redis is not configured
-_lock_meta: threading.Lock = threading.Lock()
-_locks: dict[str, threading.Lock] = {}
 
-
-def _get_redis_url() -> str | None:
-    """Return Redis URL if configured (same as sync_queue)."""
+def _get_redis_url() -> str:
+    """Return Redis URL. Raises RuntimeError if not configured."""
     url = os.environ.get("REDIS_URL", "").strip()
     if url:
         return url
     host = os.environ.get("REDIS_HOST", "").strip()
     if not host:
-        return None
+        raise RuntimeError("Redis not configured (set REDIS_HOST or REDIS_URL)")
     port = os.environ.get("REDIS_PORT", "6379")
     password = os.environ.get("REDIS_PASSWORD", "")
     use_ssl = os.environ.get("REDIS_USE_SSL", "false").lower() == "true"
@@ -31,6 +26,23 @@ def _get_redis_url() -> str | None:
     if password:
         return f"{scheme}://:{password}@{host}:{port}/0"
     return f"{scheme}://{host}:{port}/0"
+
+
+def _get_connection():
+    """Redis connection for lock. Raises on failure."""
+    from redis import Redis
+    from redis.backoff import ExponentialBackoff
+    from redis.retry import Retry
+    from redis.exceptions import BusyLoadingError, ConnectionError, TimeoutError
+
+    url = _get_redis_url()
+    retry = Retry(ExponentialBackoff(), 3)
+    return Redis.from_url(
+        url,
+        retry=retry,
+        retry_on_error=[BusyLoadingError, ConnectionError, TimeoutError],
+        health_check_interval=30,
+    )
 
 
 def get_sync_lock_key(resolved_db: str, project_id: int, version_id: int | None) -> str:
@@ -46,59 +58,20 @@ def try_acquire_sync_lock(
     """
     Try to acquire the sync lock. Non-blocking.
     Returns True if acquired, False if another sync holds it.
+    Raises if Redis is unavailable.
     """
-    redis_url = _get_redis_url()
-    if redis_url:
-        try:
-            from redis import Redis
-            from redis.backoff import ExponentialBackoff
-            from redis.retry import Retry
-            from redis.exceptions import BusyLoadingError, ConnectionError, TimeoutError
-
-            conn = Redis.from_url(
-                redis_url,
-                retry=Retry(ExponentialBackoff(), 3),
-                retry_on_error=[BusyLoadingError, ConnectionError, TimeoutError],
-                health_check_interval=30,
-            )
-            acquired = conn.set(lock_key, "1", nx=True, ex=ttl_seconds)
-            conn.close()
-            return bool(acquired)
-        except Exception:
-            # Fall back to in-memory lock if Redis fails
-            pass
-
-    # In-memory: one lock per key
-    with _lock_meta:
-        if lock_key not in _locks:
-            _locks[lock_key] = threading.Lock()
-    return _locks[lock_key].acquire(blocking=False)
+    conn = _get_connection()
+    try:
+        acquired = conn.set(lock_key, "1", nx=True, ex=ttl_seconds)
+        return bool(acquired)
+    finally:
+        conn.close()
 
 
 def release_sync_lock(lock_key: str) -> None:
-    """Release the sync lock. Must be called by the same process that acquired it."""
-    redis_url = _get_redis_url()
-    if redis_url:
-        try:
-            from redis import Redis
-            from redis.backoff import ExponentialBackoff
-            from redis.retry import Retry
-            from redis.exceptions import BusyLoadingError, ConnectionError, TimeoutError
-
-            conn = Redis.from_url(
-                redis_url,
-                retry=Retry(ExponentialBackoff(), 3),
-                retry_on_error=[BusyLoadingError, ConnectionError, TimeoutError],
-                health_check_interval=30,
-            )
-            conn.delete(lock_key)
-            conn.close()
-            return
-        except Exception:
-            pass
-
-    if lock_key in _locks:
-        try:
-            _locks[lock_key].release()
-        except RuntimeError:
-            pass  # already released
+    """Release the sync lock. Raises if Redis is unavailable."""
+    conn = _get_connection()
+    try:
+        conn.delete(lock_key)
+    finally:
+        conn.close()
