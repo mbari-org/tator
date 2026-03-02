@@ -76,6 +76,26 @@ def get_vss_project(project_name: str, port: int) -> str | None:
     proj = _yaml_config.projects.get(project_name.strip())
     return getattr(proj, "vss_project", None) if proj else None
 
+
+def get_s3_config(
+    project_id: int, project_name: str | None = None
+) -> dict[str, str] | None:
+    """
+    Return S3 config for this project when configured: {"s3_bucket": str, "s3_prefix": str | None}.
+    Only returns when project has valid config and s3_bucket is set. Used to show S3 field in applet.
+    """
+    _load_config()
+    if not _yaml_config:
+        return None
+    name = (project_name or _project_id_to_name.get(project_id) or "").strip() or str(project_id)
+    proj = _yaml_config.projects.get(name)
+    if not proj or not getattr(proj, "s3_bucket", None):
+        return None
+    return {
+        "s3_bucket": (proj.s3_bucket or "").strip(),
+        "s3_prefix": (getattr(proj, "s3_prefix", None) or "").strip() or None,
+    }
+
 def register_project_id_name(project_id: int, project_name: str) -> None:
     """Register project_id -> project_name so get_database_entry can resolve when project_name is not passed."""
     if project_id and project_name and str(project_name).strip():

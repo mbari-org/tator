@@ -28,7 +28,7 @@ from embedding_service import (
     init_disk_cache,
     queue_embedding_job,
 )
-from database_manager import get_database_entry
+from database_manager import get_database_entry, get_s3_config
 from database_uri_config import DatabaseUriConfig, database_name_from_uri
 
 TATOR_INTERNAL_API_URL = os.environ.get("TATOR_INTERNAL_API_URL", "").strip().rstrip("/")
@@ -275,6 +275,16 @@ LAUNCHER_TEMPLATE = r"""
             </div>
           </td>
         </tr>
+        <tr id="s3-bucket-row" style="display: none;">
+          <th>S3 bucket</th>
+          <td>
+            <div class="cell-controls">
+              <input type="text" id="s3-bucket-input" placeholder="bucket (optional)" autocomplete="off" />
+              <input type="text" id="s3-prefix-input" placeholder="prefix (optional)" autocomplete="off" />
+            </div>
+            <p class="applet-header" style="margin-top: 0.25rem; font-size: 0.75rem; color: #999;">Optional: sync raw images to S3 and load dataset by class (parent folder = class name).</p>
+          </td>
+        </tr>
         {% endif %}
         <tr>
           <th>Embedding service</th>
@@ -415,6 +425,12 @@ LAUNCHER_TEMPLATE = r"""
                   }
                   if (d && d.database_name) databaseName = d.database_name;
                   if (d && d.database_uri) databaseUri = d.database_uri;
+                  var s3Row = document.getElementById('s3-bucket-row');
+                  if (s3Row) s3Row.style.display = '';
+                  var s3BucketInput = document.getElementById('s3-bucket-input');
+                  var s3PrefixInput = document.getElementById('s3-prefix-input');
+                  if (s3BucketInput && d && d.s3_bucket) s3BucketInput.value = d.s3_bucket;
+                  if (s3PrefixInput && d && d.s3_prefix) s3PrefixInput.value = d.s3_prefix;
                   setSyncControlsEnabled(true);
                   syncStatus.textContent = 'Token OK. Sync enabled.';
                   syncStatus.classList.remove('error');
@@ -422,6 +438,8 @@ LAUNCHER_TEMPLATE = r"""
                 })
                 .catch(function(err) {
                   hasDatabaseEntry = false;
+                  var s3Row = document.getElementById('s3-bucket-row');
+                  if (s3Row) s3Row.style.display = 'none';
                   setSyncControlsEnabled(true);
                   syncStatus.textContent = 'Token OK but sync disabled: ' + (err.message || 'no database entry for this project');
                   syncStatus.classList.add('error');
@@ -485,6 +503,10 @@ LAUNCHER_TEMPLATE = r"""
           if (v) params.set('version_id', v);
           var forceSyncEl = document.getElementById('force-sync-checkbox');
           if (forceSyncEl && forceSyncEl.checked) params.set('force_sync', 'true');
+          var s3BucketEl = document.getElementById('s3-bucket-input');
+          var s3PrefixEl = document.getElementById('s3-prefix-input');
+          if (s3BucketEl && s3BucketEl.value.trim()) params.set('s3_bucket', s3BucketEl.value.trim());
+          if (s3PrefixEl && s3PrefixEl.value.trim()) params.set('s3_prefix', s3PrefixEl.value.trim());
           var fullSyncUrl = syncServiceUrl + '/sync?' + params.toString();
           fetch(fullSyncUrl, { method: 'POST' })
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
@@ -668,7 +690,16 @@ async def get_database_info(
     database_entry = get_database_entry(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
-    return { "port": database_entry.port, "database_name": database_name_from_uri(database_entry.uri), "database_uri": database_entry.uri }
+    out = {
+        "port": database_entry.port,
+        "database_name": database_name_from_uri(database_entry.uri),
+        "database_uri": database_entry.uri,
+    }
+    s3_config = get_s3_config(project_id, project_name=project_name)
+    if s3_config:
+        out["s3_bucket"] = s3_config.get("s3_bucket")
+        out["s3_prefix"] = s3_config.get("s3_prefix")
+    return out
 
 
 @app_launch.get("/render", response_class=HTMLResponse)
@@ -733,6 +764,8 @@ async def sync(
     config_path: str | None = Query(None, description="Path to YAML/JSON config file for dataset build"),
     launch_app: bool = Query(True, description="Launch FiftyOne app after sync"),
     force_sync: bool = Query(False, description="Force full sync; bypass cached JSONL and re-fetch media/localizations"),
+    s3_bucket: str | None = Query(None, description="Optional S3 bucket for raw image upload; parent folder = class name"),
+    s3_prefix: str | None = Query(None, description="Optional S3 prefix (folder) for raw image upload"),
 ) -> dict:
     """
     Trigger sync: fetch Tator media + localizations, build FiftyOne dataset, launch App.
@@ -772,6 +805,8 @@ async def sync(
                 config_path=config_path,
                 launch_app=launch_app,
                 force_sync=force_sync,
+                s3_bucket=s3_bucket,
+                s3_prefix=s3_prefix,
             )
             return {"job_id": job_id, "status": "queued", "port": port}
         except Exception as e:
@@ -790,6 +825,8 @@ async def sync(
           config_path=config_path,
           launch_app=launch_app,
           force_sync=force_sync,
+          s3_bucket=s3_bucket,
+          s3_prefix=s3_prefix,
       )
       if result.get("status") == "busy":
           raise HTTPException(

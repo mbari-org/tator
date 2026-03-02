@@ -29,9 +29,11 @@ class DatabaseEntry:
 
 @dataclass
 class ProjectConfig:
-    """Per-project config: optional vss_project and list of databases (uri/port). Key is project name."""
+    """Per-project config: optional vss_project, optional S3 (bucket/prefix for raw image upload), and list of databases (uri/port). Key is project name."""
 
     vss_project: str | None = None
+    s3_bucket: str | None = None
+    s3_prefix: str | None = None
     databases: list[DatabaseEntry] = field(default_factory=list)
 
 
@@ -86,6 +88,16 @@ class DatabaseUriConfig:
                 raise ValueError(
                     f"project {key!r} 'vss_project' must be a string if present, got {type(vss_project).__name__}"
                 )
+            s3_bucket = proj.get("s3_bucket")
+            if s3_bucket is not None and not isinstance(s3_bucket, str):
+                raise ValueError(
+                    f"project {key!r} 's3_bucket' must be a string if present, got {type(s3_bucket).__name__}"
+                )
+            s3_prefix = proj.get("s3_prefix")
+            if s3_prefix is not None and not isinstance(s3_prefix, str):
+                raise ValueError(
+                    f"project {key!r} 's3_prefix' must be a string if present, got {type(s3_prefix).__name__}"
+                )
             db_list_raw = proj.get("databases")
             if db_list_raw is None:
                 db_list_raw = []
@@ -111,6 +123,9 @@ class DatabaseUriConfig:
                     )
                 entries.append(DatabaseEntry(uri=uri, port=port))
             projects[str(key)] = ProjectConfig(
-                vss_project=vss_project, databases=entries
+                vss_project=vss_project,
+                s3_bucket=(s3_bucket.strip() or None) if (s3_bucket and isinstance(s3_bucket, str)) else None,
+                s3_prefix=(s3_prefix.strip() or None) if (s3_prefix and isinstance(s3_prefix, str)) else None,
+                databases=entries,
             )
         return cls(projects=projects)

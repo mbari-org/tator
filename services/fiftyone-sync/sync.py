@@ -32,6 +32,7 @@ from database_manager import (
     get_database_uri,
     get_port_for_project,
     get_session,
+    get_s3_config,
     get_vss_project,
 )
 from sync_lock import get_sync_lock_key, release_sync_lock, try_acquire_sync_lock
@@ -677,6 +678,136 @@ def _cleanup_download_dir(project_id: int) -> None:
             logger.info(f"Removed download directory: {dl_dir}")
         except OSError as e:
             logger.info(f"Could not remove download directory {dl_dir}: {e}")
+
+
+# Image extensions for S3 raw-image dataset (parent folder = class name)
+DEFAULT_S3_IMAGE_EXTENSIONS = ("png", "jpg", "jpeg", "bmp", "tiff", "tif", "webp", "gif")
+
+
+def _s3_uri_parent_and_stem(s3_uri: str) -> tuple[str, str]:
+    """
+    Parse s3://bucket/prefix/class_name/filename.ext into (parent_folder_name, stem).
+    Parent folder is used as class label; stem is the filename without extension (e.g. elemental_id).
+    """
+    s3_uri = (s3_uri or "").strip().rstrip("/")
+    if not s3_uri.startswith("s3://"):
+        return ("unknown", "")
+    path_part = s3_uri.replace("s3://", "", 1)
+    if "/" in path_part:
+        path_part = path_part.split("/", 1)[1]  # drop bucket
+    parts = [p for p in path_part.split("/") if p]
+    if len(parts) >= 2:
+        parent_folder = parts[-2]
+        last = parts[-1]
+        stem = last.rsplit(".", 1)[0] if "." in last else last
+        return (parent_folder, stem)
+    if len(parts) == 1:
+        last = parts[0]
+        stem = last.rsplit(".", 1)[0] if "." in last else last
+        return ("unknown", stem)
+    return ("unknown", "")
+
+
+def _sync_local_dir_to_s3(local_dir: str, bucket: str, prefix: str | None = None) -> None:
+    """
+    Sync a local directory to S3. Uses `aws s3 sync` subprocess when available (most efficient),
+    otherwise falls back to boto3 upload_file for each file.
+    """
+    if not os.path.isdir(local_dir):
+        logger.warning(f"S3 sync skipped: local dir does not exist: {local_dir}")
+        return
+    prefix = (prefix or "").strip().rstrip("/")
+    s3_uri = f"s3://{bucket}/{prefix}/" if prefix else f"s3://{bucket}/"
+    try:
+        subprocess.run(
+            ["aws", "s3", "sync", local_dir, s3_uri, "--only-show-errors"],
+            check=True,
+            capture_output=True,
+            timeout=3600,
+        )
+        logger.info(f"S3 sync completed: {local_dir} -> {s3_uri}")
+    except FileNotFoundError:
+        logger.info("aws CLI not found; using boto3 for S3 upload")
+        try:
+            import boto3
+            client = boto3.client("s3")
+            for root, _dirs, files in os.walk(local_dir):
+                for f in files:
+                    local_path = os.path.join(root, f)
+                    rel = os.path.relpath(local_path, local_dir)
+                    key = f"{prefix}/{rel}" if prefix else rel
+                    key = key.replace("\\", "/")
+                    client.upload_file(local_path, bucket, key)
+            logger.info(f"S3 upload completed via boto3: {local_dir} -> {s3_uri}")
+        except Exception as e:
+            logger.exception(f"S3 upload failed: {e}")
+            raise
+    except subprocess.CalledProcessError as e:
+        logger.exception(f"aws s3 sync failed: {e}")
+        raise
+
+
+def build_fiftyone_dataset_from_s3(
+    s3_bucket: str,
+    s3_prefix: str | None,
+    dataset_name: str,
+    config: dict[str, Any] | None = None,
+) -> fo.Dataset:
+    """
+    List image files in an S3 bucket/prefix using fiftyone.core.storage, then build a FiftyOne
+    dataset where the parent folder of each file is used as the class label.
+    Assumes layout: s3://bucket/prefix/class_name/image_id.jpg (class_name = label).
+    """
+    import fiftyone.core.storage as fos
+
+    config = config or {}
+    image_extensions = config.get("image_extensions") or list(DEFAULT_S3_IMAGE_EXTENSIONS)
+    # Normalize to bare extensions for matching (e.g. "jpg" from "*.jpg" or "jpg")
+    ext_set = set()
+    for ext in image_extensions:
+        e = (ext or "").strip().lstrip("*.")
+        if e:
+            ext_set.add(e.lower())
+
+    prefix = (s3_prefix or "").strip().rstrip("/")
+    s3_dir = f"s3://{s3_bucket}/{prefix}/" if prefix else f"s3://{s3_bucket}/"
+    logger.info(f"Listing S3 files: {s3_dir} (recursive)")
+    s3_files = fos.list_files(s3_dir, recursive=True, abs_paths=True)
+    samples: list[fo.Sample] = []
+    for s3_uri in s3_files:
+        s3_uri_lower = s3_uri.lower()
+        matched = False
+        for ext in ext_set:
+            if s3_uri_lower.endswith(f".{ext}"):
+                matched = True
+                break
+        if not matched:
+            continue
+        parent_folder, elemental_id = _s3_uri_parent_and_stem(s3_uri)
+        label_name = parent_folder if parent_folder else "unknown"
+        sample = fo.Sample(filepath=s3_uri)
+        sample["ground_truth"] = fo.Classification(label=label_name, confidence=1.0)
+        sample["elemental_id"] = elemental_id
+        sample["label"] = label_name
+        sample.tags.append(label_name)
+        samples.append(sample)
+
+    if not samples:
+        raise ValueError(f"No image files found in {s3_dir} (extensions: {list(ext_set)})")
+    logger.info(f"Collected {len(samples)} samples from S3 for dataset {dataset_name}")
+
+    if dataset_name in fo.list_datasets():
+        dataset = fo.load_dataset(dataset_name)
+        dataset.persistent = True
+        dataset.clear()
+        dataset.add_samples(samples)
+        logger.info(f"Replaced dataset '{dataset_name}' with {len(samples)} S3 samples")
+    else:
+        dataset = fo.Dataset(dataset_name)
+        dataset.persistent = True
+        dataset.add_samples(samples)
+        logger.info(f"Created dataset '{dataset_name}' with {len(samples)} S3 samples")
+    return dataset
 
 
 def _find_crop_cache_misses(
@@ -1347,8 +1478,9 @@ def run_sync_job(
     database_uri: str | None = None,
     database_name: str | None = None,
     config_path: str | None = None,
-    launch_app: bool = True,
     force_sync: bool = False,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
 ) -> dict[str, Any]:
     """
     Entrypoint for RQ worker: all args are serializable. Calls sync_project_to_fiftyone.
@@ -1365,8 +1497,9 @@ def run_sync_job(
         database_uri=database_uri,
         database_name=database_name,
         config_path=config_path,
-        launch_app=launch_app,
         force_sync=force_sync,
+        s3_bucket=s3_bucket,
+        s3_prefix=s3_prefix,
     )
 
 
@@ -1380,15 +1513,25 @@ def sync_project_to_fiftyone(
     database_uri: str | None = None,
     database_name: str | None = None,
     config_path: str | None = None,
-    launch_app: bool = True,
     force_sync: bool = False,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
 ) -> dict[str, Any]:
     """
     Fetch Tator media and localizations, build FiftyOne dataset, launch App on given port.
     Uses per-project MongoDB database (database_uri when provided, else resolved via config; database_name override or get_database_name).
+    Optional s3_bucket/s3_prefix: sync raw images to S3 and build a second dataset from S3 (parent folder = class name).
     Returns {"status": "ok", "dataset_name": str, "database_name": str} or raises.
     """
-    logger.info(f"sync_project_to_fiftyone CALLED: project_id={project_id} version_id={version_id} api_url={api_url} port={port}")
+    if not (s3_bucket and s3_bucket.strip()):
+        s3_cfg = get_s3_config(project_id, project_name=project_name)
+        if s3_cfg:
+            s3_bucket = s3_cfg.get("s3_bucket") or None
+            s3_prefix = s3_cfg.get("s3_prefix") or s3_prefix
+    if s3_bucket:
+        s3_bucket = s3_bucket.strip()
+        s3_prefix = (s3_prefix or "").strip() or None
+    logger.info(f"sync_project_to_fiftyone CALLED: project_id={project_id} version_id={version_id} api_url={api_url} port={port} s3_bucket={s3_bucket or 'none'}")
     sess = get_session(project_id, port)
     resolved_db = (
         (database_name.strip() if database_name and database_name.strip() else None)
@@ -1511,7 +1654,14 @@ def sync_project_to_fiftyone(
             # 8. Persist the updated manifest
             _save_crop_manifest(project_id, version_id, updated_manifest)
 
-            # 9. Remove downloaded media to reclaim disk space
+            # 9. Optional: sync raw images to S3 (then list S3 to build dataset below)
+            if s3_bucket and os.path.isdir(dl_dir):
+                try:
+                    _sync_local_dir_to_s3(dl_dir, s3_bucket, s3_prefix)
+                except Exception as e:
+                    logger.warning(f"S3 sync failed (dataset from crops still built): {e}")
+
+            # 10. Remove downloaded media to reclaim disk space
             _cleanup_download_dir(project_id)
 
         except Exception as e:
@@ -1574,6 +1724,17 @@ def sync_project_to_fiftyone(
                 "saved_localizations_path": localizations_path or None,
                 "saved_crops_dir": crops or None,
             }
+
+        # Optional: build dataset from S3 (parent folder = class name)
+        if s3_bucket:
+            try:
+                s3_dataset_name = dataset_name + "_raw"
+                build_fiftyone_dataset_from_s3(
+                    s3_bucket, s3_prefix, s3_dataset_name, config=config,
+                )
+                logger.info(f"S3 dataset '{s3_dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
+            except Exception as e:
+                logger.warning(f"Build dataset from S3 failed (crop dataset unchanged): {e}")
 
         logger.info(f"sync_project_to_fiftyone done: dataset={dataset_name}")
         logger.info(

@@ -65,6 +65,8 @@ def enqueue_sync(
     config_path: str | None = None,
     launch_app: bool = True,
     force_sync: bool = False,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
 ) -> str:
     """
     Enqueue a sync job. Returns RQ job id.
@@ -88,6 +90,8 @@ def enqueue_sync(
         config_path=config_path,
         launch_app=launch_app,
         force_sync=force_sync,
+        s3_bucket=s3_bucket,
+        s3_prefix=s3_prefix,
         job_timeout=3600 * 24,  # 24h for large projects
         result_ttl=3600 * 24,
         failure_ttl=3600,
