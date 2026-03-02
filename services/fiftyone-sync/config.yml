@@ -2,6 +2,10 @@
 media_id_batch_size: 200
 localization_batch_size: 5000
 
+# When true, enable S3 upload (applet shows S3 bucket/prefix; sync uploads raw images to S3).
+# When false, S3 upload is disabled and the S3 row is hidden in the applet.
+is_enterprise: false
+
 # Optional: embeddings and UMAP; batch_size is per-request size for embed service
 # embeddings:
 #   batch_size: 32

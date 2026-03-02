@@ -64,6 +64,45 @@ pip install -r requirements.txt
 pip install -e ../../scripts/packages/tator-py
 ```
 
+## AWS S3 (raw image upload) Enterprise ONLY
+
+You can optionally sync raw images from a Tator sync to an S3 bucket and build a FiftyOne dataset where **parent folder = class name** (e.g. `s3://bucket/prefix/class_name/image.jpg` → label `class_name`). The sync worker uploads the downloaded media directory to S3, then lists the bucket with FiftyOne storage and creates a second dataset (suffix `_raw`).
+
+### config.yml
+
+Per-project S3 is configured in the same YAML file used for database URIs. Set the path via **`FIFTYONE_DATABASE_URI_CONFIG`** (e.g. `config.yml` or an absolute path). Under each project key, add optional **`s3_bucket`** and **`s3_prefix`**:
+
+```yaml
+# config.yml (or the file pointed to by FIFTYONE_DATABASE_URI_CONFIG)
+projects:
+  "my-project-name":
+    vss_project: "optional-vss-project"
+    s3_bucket: "my-bucket"           # required for S3 upload
+    s3_prefix: "fiftyone/raw"        # optional; S3 prefix (folder) under the bucket
+    databases:
+      - uri: "mongodb://localhost:27017"
+        port: 5151
+```
+
+- **`s3_bucket`** (optional): S3 bucket name. When set, the applet shows S3 bucket/prefix fields (only after the user has valid credentials). Sync will upload the downloaded media dir to this bucket and build a dataset from the listed S3 objects.
+- **`s3_prefix`** (optional): Key prefix (folder path) inside the bucket, e.g. `fiftyone/raw`. Omit or leave empty to use the bucket root.
+
+Project keys must match the **Tator project name** (from the API), not the project ID.
+
+### AWS credentials
+
+The sync worker (and any process that runs sync) needs AWS credentials with permission to **upload** to the bucket (`s3:PutObject`, and list if applicable). Use one of:
+
+- **Environment variables**: `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and optionally `AWS_DEFAULT_REGION` (or `AWS_REGION`). Set these in the environment of the sync worker (e.g. in Docker or your process manager).
+- **IAM role**: When the worker runs on AWS (EC2, ECS, Lambda, etc.), attach an IAM role with the same S3 permissions; no env vars needed.
+- **AWS CLI config**: If the worker runs in an environment where `aws configure` has been used, the default profile is used.
+
+Upload uses the most efficient path available: **`aws s3 sync`** when the AWS CLI is installed, otherwise **boto3** (upload per file). Ensure the bucket exists and the credentials have access before running a sync with S3 enabled.
+
+### Applet behavior
+
+When a project has `s3_bucket` set in config, the launcher applet shows **S3 bucket** and **S3 prefix** inputs only after the user has entered a valid token and passed **Test token** (and a database entry exists for the project). Values from config are pre-filled; the user can override them before clicking **Load from Tator**. Sync then uses the applet values or, if omitted, the config values.
+
 ## Testing
 
 Sync requires Redis and a running sync worker.
@@ -107,7 +146,6 @@ Sync requires Redis and a running sync worker.
 
 6. In the **browser**, after clicking **Sync from Tator** you should see “Sync queued…”, then “Sync in progress…”, then “Sync done. Opening FiftyOne…” without the tab freezing.
 
- That’s 
 ## Hosted Template applet (recommended)
 
 This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template and renders it with template parameters. The dashboard shows **Open FiftyOne** (opens the app in a new tab) and sync controls (when sync_service_url and api_url are set). Users enter their Tator API token in the applet and click **Test token** to verify it; the Version dropdown and **Sync from Tator** / **Sync to Tator** buttons then become enabled.

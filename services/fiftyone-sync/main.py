@@ -28,7 +28,7 @@ from embedding_service import (
     init_disk_cache,
     queue_embedding_job,
 )
-from database_manager import get_database_entry, get_s3_config
+from database_manager import get_database_entry, get_is_enterprise, get_s3_config
 from database_uri_config import DatabaseUriConfig, database_name_from_uri
 
 TATOR_INTERNAL_API_URL = os.environ.get("TATOR_INTERNAL_API_URL", "").strip().rstrip("/")
@@ -323,6 +323,7 @@ LAUNCHER_TEMPLATE = r"""
       var testTokenBtn = document.getElementById('test-token-btn');
       var tokenVerified = false;
       var hasDatabaseEntry = false;
+      var isEnterprise = false;
       var versionId = '';
       function getToken() {
         return tokenInput ? tokenInput.value.trim() : '';
@@ -418,6 +419,7 @@ LAUNCHER_TEMPLATE = r"""
                 })
                 .then(function(d) {
                   hasDatabaseEntry = true;
+                  isEnterprise = !!(d && d.is_enterprise);
                   if (d && d.port != null) {
                     port = d.port;
                     appUrl = 'http://' + iframeHost + ':' + port + '/';
@@ -426,7 +428,7 @@ LAUNCHER_TEMPLATE = r"""
                   if (d && d.database_name) databaseName = d.database_name;
                   if (d && d.database_uri) databaseUri = d.database_uri;
                   var s3Row = document.getElementById('s3-bucket-row');
-                  if (s3Row) s3Row.style.display = '';
+                  if (s3Row) s3Row.style.display = isEnterprise ? '' : 'none';
                   var s3BucketInput = document.getElementById('s3-bucket-input');
                   var s3PrefixInput = document.getElementById('s3-prefix-input');
                   if (s3BucketInput && d && d.s3_bucket) s3BucketInput.value = d.s3_bucket;
@@ -503,10 +505,12 @@ LAUNCHER_TEMPLATE = r"""
           if (v) params.set('version_id', v);
           var forceSyncEl = document.getElementById('force-sync-checkbox');
           if (forceSyncEl && forceSyncEl.checked) params.set('force_sync', 'true');
-          var s3BucketEl = document.getElementById('s3-bucket-input');
-          var s3PrefixEl = document.getElementById('s3-prefix-input');
-          if (s3BucketEl && s3BucketEl.value.trim()) params.set('s3_bucket', s3BucketEl.value.trim());
-          if (s3PrefixEl && s3PrefixEl.value.trim()) params.set('s3_prefix', s3PrefixEl.value.trim());
+          if (isEnterprise) {
+            var s3BucketEl = document.getElementById('s3-bucket-input');
+            var s3PrefixEl = document.getElementById('s3-prefix-input');
+            if (s3BucketEl && s3BucketEl.value.trim()) params.set('s3_bucket', s3BucketEl.value.trim());
+            if (s3PrefixEl && s3PrefixEl.value.trim()) params.set('s3_prefix', s3PrefixEl.value.trim());
+          }
           var fullSyncUrl = syncServiceUrl + '/sync?' + params.toString();
           fetch(fullSyncUrl, { method: 'POST' })
             .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, data: d }; }); })
@@ -694,6 +698,7 @@ async def get_database_info(
         "port": database_entry.port,
         "database_name": database_name_from_uri(database_entry.uri),
         "database_uri": database_entry.uri,
+        "is_enterprise": get_is_enterprise(),
     }
     s3_config = get_s3_config(project_id, project_name=project_name)
     if s3_config:
@@ -789,6 +794,11 @@ async def sync(
     database_entry = get_database_entry(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
+
+    # Disable S3 upload when is_enterprise is False (config)
+    if not get_is_enterprise():
+        s3_bucket = None
+        s3_prefix = None
 
     try:
         job_id = enqueue_sync(

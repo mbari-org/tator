@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -37,6 +38,17 @@ class ProjectConfig:
     databases: list[DatabaseEntry] = field(default_factory=list)
 
 
+def _parse_bool(value: Any) -> bool:
+    """Parse YAML value to bool. Accepts bool, or string 'true'/'false'/'yes'/'1'."""
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "yes", "1")
+    return bool(value)
+
+
 @dataclass
 class DatabaseUriConfig:
     """
@@ -45,6 +57,7 @@ class DatabaseUriConfig:
     """
 
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
+    is_enterprise: bool = False
 
     @classmethod
     def from_yaml_path(cls, path: str | Path) -> DatabaseUriConfig:
@@ -70,9 +83,10 @@ class DatabaseUriConfig:
             raise ValueError(
                 f"Database URI config YAML must be a mapping at top level, got {type(raw).__name__}"
             )
+        is_enterprise = _parse_bool(raw.get("is_enterprise", False))
         projects_raw = raw.get("projects")
         if projects_raw is None:
-            return cls()
+            return cls(projects={}, is_enterprise=is_enterprise)
         if not isinstance(projects_raw, dict):
             raise ValueError(
                 f"config 'projects' must be a mapping, got {type(projects_raw).__name__}"
@@ -128,4 +142,4 @@ class DatabaseUriConfig:
                 s3_prefix=(s3_prefix.strip() or None) if (s3_prefix and isinstance(s3_prefix, str)) else None,
                 databases=entries,
             )
-        return cls(projects=projects)
+        return cls(projects=projects, is_enterprise=is_enterprise)
