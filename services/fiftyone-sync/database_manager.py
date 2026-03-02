@@ -124,6 +124,25 @@ def get_database_entry(
     return cfg.get(key)
 
 
+def get_database_entry_or_enterprise_default(
+    project_id: int, port: int, project_name: str | None = None
+) -> DatabaseEntry | None:
+    """
+    Like get_database_entry, but for enterprise (is_enterprise=True) returns a synthetic
+    entry using port and FIFTYONE_DATABASE_URI / default naming when no config entry exists.
+    Callers can avoid requiring FIFTYONE_DATABASE_URI_CONFIG for enterprise.
+    """
+    entry = get_database_entry(project_id, port, project_name=project_name)
+    if entry is not None:
+        return entry
+    if not get_is_enterprise():
+        return None
+    uri = get_database_uri(project_id, port, project_name=project_name)
+    if not uri:
+        uri = "mongodb://localhost:27017/" + get_database_name(project_id, port, project_name=project_name)
+    return DatabaseEntry(uri=uri, port=port)
+
+
 def get_database_uri(
     project_id: int, port: int, project_name: str | None = None
 ) -> str | None:

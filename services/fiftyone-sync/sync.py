@@ -27,7 +27,7 @@ import yaml
 from PIL import Image
 from database_uri_config import database_name_from_uri
 from database_manager import (
-    get_database_entry,
+    get_database_entry_or_enterprise_default,
     get_database_name,
     get_database_uri,
     get_port_for_project,
@@ -1361,7 +1361,7 @@ def sync_edits_to_tator(
     then updates attributes via update_localization(id, localization_update).
     Returns {"status": "ok", "updated": int, "failed": int, "errors": list} or raises.
     """
-    db_entry = get_database_entry(project_id, port, project_name=project_name)
+    db_entry = get_database_entry_or_enterprise_default(project_id, port, project_name=project_name)
     if db_entry is None:
         raise ValueError(f"No database entry found for project_id={project_id} and port={port}")
     db_name = database_name_from_uri(db_entry.uri)

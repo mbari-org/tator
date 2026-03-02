@@ -28,7 +28,7 @@ from embedding_service import (
     init_disk_cache,
     queue_embedding_job,
 )
-from database_manager import get_database_entry, get_is_enterprise, get_s3_config
+from database_manager import get_database_entry_or_enterprise_default, get_is_enterprise, get_s3_config
 from database_uri_config import DatabaseUriConfig, database_name_from_uri
 
 TATOR_INTERNAL_API_URL = os.environ.get("TATOR_INTERNAL_API_URL", "").strip().rstrip("/")
@@ -282,7 +282,6 @@ LAUNCHER_TEMPLATE = r"""
               <input type="text" id="s3-bucket-input" placeholder="bucket (optional)" autocomplete="off" />
               <input type="text" id="s3-prefix-input" placeholder="prefix (optional)" autocomplete="off" />
             </div>
-            <p class="applet-header" style="margin-top: 0.25rem; font-size: 0.75rem; color: #999;">Optional: sync raw images to S3 and load dataset by class (parent folder = class name).</p>
           </td>
         </tr>
         {% endif %}
@@ -691,7 +690,7 @@ async def get_database_info(
         project_name = str(project_id)
     project_name = project_name.strip()
     logger.info(f"request project_id={project_id} -> project_name={project_name!r} port={port}")
-    database_entry = get_database_entry(project_id, port, project_name=project_name)
+    database_entry = get_database_entry_or_enterprise_default(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
     out = {
@@ -790,7 +789,7 @@ async def sync(
     project_name = project_name.strip()
     logger.info(f"project_id={project_id} project_name={project_name!r} -> port={port}")
     api_url_clean = _resolve_api_url(api_url)
-    database_entry = get_database_entry(project_id, port, project_name=project_name)
+    database_entry = get_database_entry_or_enterprise_default(project_id, port, project_name=project_name)
     if database_entry is None:
         raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
 
