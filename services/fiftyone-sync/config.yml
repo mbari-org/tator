@@ -6,6 +6,10 @@ localization_batch_size: 5000
 # When false, S3 upload is disabled and the S3 row is hidden in the applet.
 is_enterprise: false
 
+# When true (production), fo.config.database_uri and fo.config.database_name are not set;
+# FiftyOne uses its own config. When false, sync sets them per project/port.
+# is_production: false
+
 # Optional: embeddings and UMAP; batch_size is per-request size for embed service
 # embeddings:
 #   batch_size: 32

@@ -58,6 +58,7 @@ class DatabaseUriConfig:
 
     projects: dict[str, ProjectConfig] = field(default_factory=dict)
     is_enterprise: bool = False
+    is_production: bool = False
 
     @classmethod
     def from_yaml_path(cls, path: str | Path) -> DatabaseUriConfig:
@@ -84,9 +85,10 @@ class DatabaseUriConfig:
                 f"Database URI config YAML must be a mapping at top level, got {type(raw).__name__}"
             )
         is_enterprise = _parse_bool(raw.get("is_enterprise", False))
+        is_production = _parse_bool(raw.get("is_production", False))
         projects_raw = raw.get("projects")
         if projects_raw is None:
-            return cls(projects={}, is_enterprise=is_enterprise)
+            return cls(projects={}, is_enterprise=is_enterprise, is_production=is_production)
         if not isinstance(projects_raw, dict):
             raise ValueError(
                 f"config 'projects' must be a mapping, got {type(projects_raw).__name__}"
@@ -142,4 +144,4 @@ class DatabaseUriConfig:
                 s3_prefix=(s3_prefix.strip() or None) if (s3_prefix and isinstance(s3_prefix, str)) else None,
                 databases=entries,
             )
-        return cls(projects=projects, is_enterprise=is_enterprise)
+        return cls(projects=projects, is_enterprise=is_enterprise, is_production=is_production)

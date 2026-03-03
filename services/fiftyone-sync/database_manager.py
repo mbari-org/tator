@@ -83,6 +83,12 @@ def get_is_enterprise() -> bool:
     return getattr(_yaml_config, "is_enterprise", False) if _yaml_config else False
 
 
+def get_is_production() -> bool:
+    """Return is_production from config. When True, fo.config.database_uri is not set (FiftyOne uses its own config)."""
+    _load_config()
+    return getattr(_yaml_config, "is_production", False) if _yaml_config else False
+
+
 def get_s3_config(
     project_id: int, project_name: str | None = None
 ) -> dict[str, str] | None:

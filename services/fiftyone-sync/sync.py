@@ -31,6 +31,7 @@ from database_manager import (
     get_database_name,
     get_database_uri,
     get_is_enterprise,
+    get_is_production,
     get_port_for_project,
     get_session,
     get_s3_config,
@@ -1418,15 +1419,16 @@ def sync_edits_to_tator(
     if db_entry is None:
         raise ValueError(f"No database entry found for project_id={project_id} and port={port}")
     db_name = database_name_from_uri(db_entry.uri)
-    fo.config.database_uri = db_entry.uri
-    fo.config.database_name = db_name
-    os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
-    os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+    if not get_is_production():
+        fo.config.database_uri = db_entry.uri
+        fo.config.database_name = db_name
+        os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+        os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
     if get_is_enterprise():
         _test_fiftyone_connection()
     else:
-        _test_mongodb_connection(fo.config.database_uri)
+        _test_mongodb_connection(db_entry.uri)
 
     host = api_url.rstrip("/")
     api = tator.get_api(host, token)
@@ -1460,11 +1462,13 @@ def sync_edits_to_tator(
     fallback_db = f"{os.environ.get('FIFTYONE_DATABASE_DEFAULT', 'fiftyone_project')}_{project_id}"
     resolved = _resolve_dataset(ds_name)
     if resolved is None and db_name != fallback_db:
-        fo.config.database_name = fallback_db
-        os.environ["FIFTYONE_DATABASE_NAME"] = fallback_db
+        if not get_is_production():
+            fo.config.database_name = fallback_db
+            os.environ["FIFTYONE_DATABASE_NAME"] = fallback_db
         resolved = _resolve_dataset(ds_name)
     if resolved is None:
-        fo.config.database_name = db_name
+        if not get_is_production():
+            fo.config.database_name = db_name
         raise ValueError(
             f"No dataset matching project '{project_prefix}' with port {port} found in database '{db_name}' (or '{fallback_db}'). "
             "Run POST /sync first. Ensure FIFTYONE_DATABASE_URI and FIFTYONE_DATABASE_NAME match the sync process."
@@ -1614,16 +1618,20 @@ def sync_project_to_fiftyone(
         (database_name.strip() if database_name and database_name.strip() else None)
         or (sess.get("database_name") if sess else None)
     )
-    fo.config.database_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
-    fo.config.database_name = resolved_db
-    logger.info(f"database_uri={fo.config.database_uri} database_name={resolved_db}")
+    resolved_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
+    if not get_is_production():
+        fo.config.database_uri = resolved_uri
+        fo.config.database_name = resolved_db
+        os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+        os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+    logger.info(f"database_uri={resolved_uri} database_name={resolved_db}")
 
     try:
         if get_is_enterprise():
             _test_fiftyone_connection()
             logger.info("FiftyOne connection OK (list_datasets)")
         else:
-            _test_mongodb_connection(fo.config.database_uri)
+            _test_mongodb_connection(resolved_uri)
             logger.info("MongoDB connection OK")
     except ConnectionError as exc:
         logger.error(f"Pre-flight connection check failed: {exc}")
@@ -1776,9 +1784,10 @@ def sync_project_to_fiftyone(
         dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
 
-        # Set env so FiftyOne app subprocess uses the same database
-        os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
-        os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+        # Set env so FiftyOne app subprocess uses the same database (only when not production)
+        if not get_is_production():
+            os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+            os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
         # Media attributes (Image type only) for dataset samples
         config["media_attributes_map"] = _build_media_attributes_map(
@@ -1996,10 +2005,11 @@ def main() -> None:
         _cleanup_download_dir(project_id)
 
     if crops and localizations_path and os.path.isdir(crops):
-        fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name_cli)
-        fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
-        os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
-        os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
+        if not get_is_production():
+            fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name_cli)
+            fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
+            os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
+            os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
         config = config_cli
         config["media_attributes_map"] = _build_media_attributes_map(
             api, project_id, localizations_path, media_id_batch_size=media_id_batch_size_cli,
