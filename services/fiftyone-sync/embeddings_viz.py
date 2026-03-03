@@ -58,12 +58,18 @@ def _compute_embeddings_via_service(
     if not samples:
         return
 
-    # Use local_filepath when present (is_enterprise/S3 mode) so the embed service can open files locally
+    # Use local_filepath when present (is_enterprise/S3 mode) so the embed service can open files locally.
+    # Skip samples with no path or remote URIs (s3://, http) since the embed service expects local files.
     path_pairs = []
     for s in samples:
-        path_to_open = s["local_filepath"] if "local_filepath" in s else s["filepath"]
+        path_to_open = s["local_filepath"] if "local_filepath" in s else s.get("filepath")
+        if path_to_open is None or not isinstance(path_to_open, (str, bytes, os.PathLike)):
+            continue
+        path_str = path_to_open if isinstance(path_to_open, str) else str(path_to_open)
+        if path_str.startswith("s3://") or path_str.startswith("http://") or path_str.startswith("https://"):
+            continue
         if os.path.isfile(path_to_open):
-            path_pairs.append((path_to_open, s["filepath"]))
+            path_pairs.append((path_to_open, s.get("filepath") or path_to_open))
     paths_to_open = [p for p, _ in path_pairs]
     sample_filepaths = [fp for _, fp in path_pairs]
     skipped = len(samples) - len(paths_to_open)

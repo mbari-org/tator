@@ -1880,10 +1880,10 @@ def sync_project_to_fiftyone(
                 "saved_crops_dir": crops or None,
             }
 
-        # Optional: build dataset from S3 (parent folder = class name)
+        # Optional: build a second dataset from S3 (suffix _raw) so the crop dataset is not overwritten
         if s3_bucket:
             try:
-                s3_dataset_name = dataset_name
+                s3_dataset_name = f"{dataset_name}_vxl51"
                 build_fiftyone_dataset_from_s3(
                     s3_bucket, s3_prefix, s3_dataset_name, config=config,
                 )
