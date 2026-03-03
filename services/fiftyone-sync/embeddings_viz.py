@@ -42,12 +42,16 @@ def _compute_embeddings_via_service(
     batch_size: int = 32,
     poll_interval: float = 2.0,
     poll_timeout: float = 300.0,
+    is_enterprise: bool = False,
 ) -> None:
     """
     Compute embeddings by sending sample images to the embed service and writing results to the dataset.
 
     Service: POST {service_url}/embed/{project_name} (no trailing slash) with files -> job_id
              then GET {service_url}/predict/job/{job_id}/{project_name} until embeddings returned.
+
+    When is_enterprise is True, only local_filepath is used (sample filepath may be S3); otherwise
+    uses local_filepath when present, else filepath.
     """
     import fiftyone as fo
     import httpx
@@ -59,10 +63,14 @@ def _compute_embeddings_via_service(
         return
 
     # Use local_filepath when present (is_enterprise/S3 mode) so the embed service can open files locally.
+    # When is_enterprise, only use local_filepath; otherwise fall back to filepath.
     # Skip samples with no path or remote URIs (s3://, http) since the embed service expects local files.
     path_pairs = []
     for s in samples:
-        path_to_open = s["local_filepath"] if "local_filepath" in s else (s["filepath"] if "filepath" in s else None)
+        if is_enterprise:
+            path_to_open = s.get("local_filepath")
+        else:
+            path_to_open = s["local_filepath"] if "local_filepath" in s else (s["filepath"] if "filepath" in s else None)
         if path_to_open is None or not isinstance(path_to_open, (str, bytes, os.PathLike)):
             continue
         path_str = path_to_open if isinstance(path_to_open, str) else str(path_to_open)
@@ -222,6 +230,7 @@ def compute_embeddings_and_viz(
     batch_size: Optional[int] = None,
     project_name: Optional[str] = None,
     service_url: Optional[str] = None,
+    is_enterprise: bool = False,
 ) -> None:
     """
     Compute embeddings and UMAP visualization with caching.
@@ -229,6 +238,8 @@ def compute_embeddings_and_viz(
     Embeddings are fetched from the embed service at {service_url}/embed/{project_name},
     where project_name is the Tator project name (get_project(project_id).name).
     UMAP is computed locally and stored under brain_key.
+
+    When is_enterprise is True, only local_filepath is passed to the embed service (sample filepath may be S3).
 
     Args:
         dataset: FiftyOne dataset
@@ -240,6 +251,7 @@ def compute_embeddings_and_viz(
         batch_size: Batch size for embed service requests (default 32)
         project_name: Project key for embed service URL path (usually project ID; required when using service)
         service_url: Base URL for embed service (default FASTVSS_API_URL or http://localhost:8000)
+        is_enterprise: When True, use only local_filepath for the embed service (filepath may be S3).
     """
     import fiftyone as fo
     import fiftyone.brain as fob
@@ -268,6 +280,7 @@ def compute_embeddings_and_viz(
             embeddings_field=embeddings_field,
             service_url=base_url,
             batch_size=batch_size or 32,
+            is_enterprise=is_enterprise,
         )
 
     # Reload so exists() and brain see the persisted embeddings

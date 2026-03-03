@@ -1978,6 +1978,7 @@ def sync_project_to_fiftyone(
                         batch_size=batch_size,
                         project_name=vss_project,
                         service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
+                        is_enterprise=get_is_enterprise(),
                     )
                     logger.info(f"Embeddings and UMAP completed for dataset '{dataset_name}'")
             except ImportError as e:
