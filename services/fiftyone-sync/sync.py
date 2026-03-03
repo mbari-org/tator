@@ -885,7 +885,7 @@ def build_fiftyone_dataset_from_s3(
         raise ValueError(f"No image files found in {s3_dir} (extensions: {list(ext_set)})")
     logger.info(f"Collected {len(samples)} samples from S3 for dataset {dataset_name}")
 
-    if dataset_name in fo.list_datasets():
+    if fo.dataset_exists(dataset_name):
         dataset = fo.load_dataset(dataset_name)
         dataset.persistent = True
         dataset.clear()
@@ -1373,8 +1373,9 @@ def build_fiftyone_dataset_from_crops(
 
     logger.info(f"Collected {len(samples)} samples for dataset")
 
-    # Handle existing dataset: always reconcile, never delete
-    if dataset_name in fo.list_datasets(): 
+    # Handle existing dataset: always reconcile, never delete (use dataset_exists so we
+    # only consider the current database, avoiding duplicate names across DBs).
+    if fo.dataset_exists(dataset_name): 
         logger.info(f"Reconcile: loading dataset {dataset_name}...")
         dataset = fo.load_dataset(dataset_name)
         dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
@@ -1681,6 +1682,10 @@ def sync_project_to_fiftyone(
         or (sess.get("database_name") if sess else None)
     )
     resolved_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
+    # Ensure we always use a single database for this (project_id, port) so the same
+    # dataset name is never created in two different databases.
+    if not get_is_enterprise() and resolved_db is None:
+        resolved_db = get_database_name(project_id, port, project_name=project_name)
     if not get_is_enterprise():
         fo.config.database_uri = resolved_uri
         fo.config.database_name = resolved_db
