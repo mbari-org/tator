@@ -58,25 +58,32 @@ def _compute_embeddings_via_service(
     if not samples:
         return
 
-    filepaths = [s["filepath"] for s in samples if os.path.isfile(s["filepath"])]
-    skipped = len(samples) - len(filepaths)
+    # Use local_filepath when present (is_enterprise/S3 mode) so the embed service can open files locally
+    path_pairs = []
+    for s in samples:
+        path_to_open = s.get("local_filepath") or s["filepath"]
+        if os.path.isfile(path_to_open):
+            path_pairs.append((path_to_open, s["filepath"]))
+    paths_to_open = [p for p, _ in path_pairs]
+    sample_filepaths = [fp for _, fp in path_pairs]
+    skipped = len(samples) - len(paths_to_open)
     if skipped:
         logger.warning(f"Skipping {skipped} missing file(s)")
 
-    if not filepaths:
+    if not paths_to_open:
         logger.warning("No valid image files to embed")
         return
 
     # Submit all batches, then poll all jobs
-    num_batches = (len(filepaths) + batch_size - 1) // batch_size
+    num_batches = (len(paths_to_open) + batch_size - 1) // batch_size
     jobs: list[tuple[int, str]] = []
 
     logger.info(f"Num batches {num_batches}")
     with httpx.Client(timeout=5.0) as client:
         # Phase 1: submit every batch and collect job IDs (retry each batch up to EMBEDDING_FETCH_MAX_RETRIES)
-        for start in range(0, len(filepaths), batch_size):
+        for start in range(0, len(paths_to_open), batch_size):
             batch_idx = start // batch_size
-            batch_paths = filepaths[start : start + batch_size]
+            batch_paths = paths_to_open[start : start + batch_size]
             files = []
             for i, fp in enumerate(batch_paths):
                 with open(fp, "rb") as f:
@@ -172,12 +179,12 @@ def _compute_embeddings_via_service(
 
     all_embeddings = [vec for batch_embs in all_embeddings for vec in batch_embs]
 
-    if len(all_embeddings) != len(filepaths):
-        logger.warning(f"Got {len(all_embeddings)} embeddings for {len(filepaths)} images")
+    if len(all_embeddings) != len(sample_filepaths):
+        logger.warning(f"Got {len(all_embeddings)} embeddings for {len(sample_filepaths)} images")
 
-    # Map back to samples by filepath; store as 1D numpy arrays so FiftyOne infers VectorField
-    # (list of floats infers ListField, which brain/UMAP may not treat as embeddings) 
-    fp_to_emb = dict(zip(filepaths, all_embeddings))
+    # Map back to samples by filepath (canonical sample filepath, not path_to_open); store as 1D numpy arrays so FiftyOne infers VectorField
+    # (list of floats infers ListField, which brain/UMAP may not treat as embeddings)
+    fp_to_emb = dict(zip(sample_filepaths, all_embeddings))
     if np is not None:
         # Bulk set via set_values so schema expands to VectorField; use sample id as key
         values_by_id = {}
