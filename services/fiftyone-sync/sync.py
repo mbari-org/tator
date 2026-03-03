@@ -762,16 +762,49 @@ def _s3_uri_parent_and_stem(s3_uri: str) -> tuple[str, str]:
     return ("unknown", "")
 
 
+def _ensure_s3_bucket_exists(bucket: str) -> None:
+    """Create the S3 bucket if it does not exist. Idempotent."""
+    import boto3
+    from botocore.exceptions import ClientError
+
+    client = boto3.client("s3")
+    try:
+        client.head_bucket(Bucket=bucket)
+        logger.debug(f"S3 bucket already exists: {bucket}")
+        return
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code != "404":
+            raise
+    region = client.meta.region_name or "us-east-1"
+    try:
+        if region == "us-east-1":
+            client.create_bucket(Bucket=bucket)
+        else:
+            client.create_bucket(
+                Bucket=bucket,
+                CreateBucketConfiguration={"LocationConstraint": region},
+            )
+        logger.info(f"S3 bucket created: {bucket} (region={region})")
+    except ClientError as e:
+        if e.response.get("Error", {}).get("Code") == "BucketAlreadyOwnedByYou":
+            return
+        raise
+
+
 def _sync_local_dir_to_s3(local_dir: str, bucket: str, prefix: str | None = None) -> None:
     """
-    Sync a local directory to S3. Uses `aws s3 sync` subprocess when available (most efficient),
-    otherwise falls back to boto3 upload_file for each file.
+    Sync a local directory to S3. Ensures the bucket exists, then uses `aws s3 sync`
+    when available (most efficient), otherwise boto3 upload_file per file.
     """
     if not os.path.isdir(local_dir):
         logger.warning(f"S3 sync skipped: local dir does not exist: {local_dir}")
         return
     prefix = (prefix or "").strip().rstrip("/")
     s3_uri = f"s3://{bucket}/{prefix}/" if prefix else f"s3://{bucket}/"
+
+    _ensure_s3_bucket_exists(bucket)
+
     try:
         subprocess.run(
             ["aws", "s3", "sync", local_dir, s3_uri, "--only-show-errors"],
@@ -785,6 +818,7 @@ def _sync_local_dir_to_s3(local_dir: str, bucket: str, prefix: str | None = None
         try:
             import boto3
             client = boto3.client("s3")
+            uploaded = 0
             for root, _dirs, files in os.walk(local_dir):
                 for f in files:
                     local_path = os.path.join(root, f)
@@ -792,7 +826,8 @@ def _sync_local_dir_to_s3(local_dir: str, bucket: str, prefix: str | None = None
                     key = f"{prefix}/{rel}" if prefix else rel
                     key = key.replace("\\", "/")
                     client.upload_file(local_path, bucket, key)
-            logger.info(f"S3 upload completed via boto3: {local_dir} -> {s3_uri}")
+                    uploaded += 1
+            logger.info(f"S3 upload completed via boto3: {uploaded} file(s) {local_dir} -> {s3_uri}")
         except Exception as e:
             logger.exception(f"S3 upload failed: {e}")
             raise
@@ -1601,7 +1636,7 @@ def sync_project_to_fiftyone(
     """
     Fetch Tator media and localizations, build FiftyOne dataset, launch App on given port.
     Uses per-project MongoDB database (database_uri when provided, else resolved via config; database_name override or get_database_name).
-    Optional s3_bucket/s3_prefix: sync raw images to S3 and build a second dataset from S3 (parent folder = class name).
+    Optional s3_bucket/s3_prefix: sync crop images to S3 (not full images) and build a second dataset from S3 (parent folder = label).
     Returns {"status": "ok", "dataset_name": str, "database_name": str} or raises.
     """
     if not (s3_bucket and s3_bucket.strip()):
@@ -1743,10 +1778,10 @@ def sync_project_to_fiftyone(
             # 8. Persist the updated manifest
             _save_crop_manifest(project_id, version_id, updated_manifest)
 
-            # 9. Optional: sync raw images to S3 (then list S3 to build dataset below)
-            if s3_bucket and os.path.isdir(dl_dir):
+            # 9. Optional: sync crop images to S3 (not full images); then list S3 to build dataset below
+            if s3_bucket and os.path.isdir(crops):
                 try:
-                    _sync_local_dir_to_s3(dl_dir, s3_bucket, s3_prefix)
+                    _sync_local_dir_to_s3(crops, s3_bucket, s3_prefix)
                 except Exception as e:
                     logger.warning(f"S3 sync failed (dataset from crops still built): {e}")
 

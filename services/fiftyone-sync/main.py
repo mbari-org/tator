@@ -806,8 +806,8 @@ async def sync(
     port: int = Query(..., description="Port for this project"),
     config_path: str | None = Query(None, description="Path to YAML/JSON config file for dataset build"),
     force_sync: bool = Query(False, description="Force full sync; bypass cached JSONL and re-fetch media/localizations"),
-    s3_bucket: str | None = Query(None, description="Optional S3 bucket for raw image upload; parent folder = class name"),
-    s3_prefix: str | None = Query(None, description="Optional S3 prefix (folder) for raw image upload"),
+    s3_bucket: str | None = Query(None, description="Optional S3 bucket for crop image upload (crops dir, not full images); bucket created if missing"),
+    s3_prefix: str | None = Query(None, description="Optional S3 prefix (folder) for crop image upload"),
 ) -> dict:
     """
     Trigger sync: enqueues a job to fetch Tator media + localizations, build FiftyOne dataset, launch App.

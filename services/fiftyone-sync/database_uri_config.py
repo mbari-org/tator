@@ -30,7 +30,7 @@ class DatabaseEntry:
 
 @dataclass
 class ProjectConfig:
-    """Per-project config: optional vss_project, optional S3 (bucket/prefix for raw image upload), and list of databases (uri/port). Key is project name."""
+    """Per-project config: optional vss_project, optional S3 (bucket/prefix for crop image upload), and list of databases (uri/port). Key is project name."""
 
     vss_project: str | None = None
     s3_bucket: str | None = None

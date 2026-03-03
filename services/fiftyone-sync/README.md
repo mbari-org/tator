@@ -64,9 +64,9 @@ pip install -r requirements.txt
 pip install -e ../../scripts/packages/tator-py
 ```
 
-## AWS S3 (raw image upload) Enterprise ONLY
+## AWS S3 (crop image upload) Enterprise ONLY
 
-You can optionally sync raw images from a Tator sync to an S3 bucket and build a FiftyOne dataset where **parent folder = class name** (e.g. `s3://bucket/prefix/class_name/image.jpg` → label `class_name`). The sync worker uploads the downloaded media directory to S3, then lists the bucket with FiftyOne storage and creates a second dataset (suffix `_raw`).
+You can optionally sync **crop images** (localization crops, not full images) from a Tator sync to an S3 bucket and build a FiftyOne dataset. The sync worker uploads the crops directory to S3 (layout: `s3://bucket/prefix/media_stem/elemental_id.png`), then lists the bucket with FiftyOne storage and creates a second dataset (suffix `_raw`). Parent folder in S3 is used as the sample label.
 
 ### config.yml
 
@@ -84,7 +84,7 @@ projects:
         port: 5151
 ```
 
-- **`s3_bucket`** (optional): S3 bucket name. When set, the applet shows S3 bucket/prefix fields (only after the user has valid credentials). Sync will upload the downloaded media dir to this bucket and build a dataset from the listed S3 objects.
+- **`s3_bucket`** (optional): S3 bucket name. When set, the applet shows S3 bucket/prefix fields (only after the user has valid credentials). Sync will upload the **crops** directory (not full images) to this bucket and build a dataset from the listed S3 objects. The bucket is created automatically if it does not exist.
 - **`s3_prefix`** (optional): Key prefix (folder path) inside the bucket, e.g. `fiftyone/raw`. Omit or leave empty to use the bucket root.
 
 Project keys must match the **Tator project name** (from the API), not the project ID.
@@ -97,7 +97,7 @@ The sync worker (and any process that runs sync) needs AWS credentials with perm
 - **IAM role**: When the worker runs on AWS (EC2, ECS, Lambda, etc.), attach an IAM role with the same S3 permissions; no env vars needed.
 - **AWS CLI config**: If the worker runs in an environment where `aws configure` has been used, the default profile is used.
 
-Upload uses the most efficient path available: **`aws s3 sync`** when the AWS CLI is installed, otherwise **boto3** (upload per file). Ensure the bucket exists and the credentials have access before running a sync with S3 enabled.
+Upload uses the most efficient path available: **`aws s3 sync`** when the AWS CLI is installed, otherwise **boto3** (upload per file). The bucket is created if it does not exist. Ensure credentials have access before running a sync with S3 enabled.
 
 ### Applet behavior
 
