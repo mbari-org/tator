@@ -791,33 +791,66 @@ def _ensure_s3_bucket_exists(bucket: str) -> None:
         raise
 
 
-def _sync_local_dir_to_s3(local_dir: str, bucket: str, prefix: str | None = None) -> None:
+def _s3_crops_prefix(base_prefix: str | None, project_id: int, version_id: int | None) -> str:
+    """S3 key prefix for this project/version crops, e.g. fiftyone/raw/12/v21/crops."""
+    base = (base_prefix or "").strip().rstrip("/")
+    path = f"{project_id}/{_version_slug(version_id)}/crops"
+    return f"{base}/{path}" if base else path
+
+
+def _sync_local_dir_with_s3(local_dir: str, bucket: str, prefix: str | None = None) -> None:
     """
-    Sync a local directory to S3. Ensures the bucket exists, then uses `aws s3 sync`
-    when available (most efficient), otherwise boto3 upload_file per file.
+    Two-way sync between a local directory and S3. Ensures the bucket exists.
+    First pulls from S3 to local, then pushes from local to S3 (both via `aws s3 sync`
+    when available, otherwise boto3 for upload and list_objects_v2 + download for pull).
     """
-    if not os.path.isdir(local_dir):
-        logger.warning(f"S3 sync skipped: local dir does not exist: {local_dir}")
-        return
     prefix = (prefix or "").strip().rstrip("/")
     s3_uri = f"s3://{bucket}/{prefix}/" if prefix else f"s3://{bucket}/"
 
     _ensure_s3_bucket_exists(bucket)
 
+    os.makedirs(local_dir, exist_ok=True)
+
     try:
-        logger.info(f"Running aws s3 sync: {local_dir} -> {s3_uri}...")
+        # 1. Pull: S3 -> local (so local has any files that exist only on S3)
+        logger.info(f"Running aws s3 sync (pull): {s3_uri} -> {local_dir}...")
+        subprocess.run(
+            ["aws", "s3", "sync", s3_uri, local_dir, "--only-show-errors"],
+            check=True,
+            capture_output=True,
+            timeout=3600,
+        )
+        logger.info(f"S3 pull completed: {s3_uri} -> {local_dir}")
+        # 2. Push: local -> S3
+        logger.info(f"Running aws s3 sync (push): {local_dir} -> {s3_uri}...")
         subprocess.run(
             ["aws", "s3", "sync", local_dir, s3_uri, "--only-show-errors"],
             check=True,
             capture_output=True,
             timeout=3600,
         )
-        logger.info(f"S3 sync completed: {local_dir} -> {s3_uri}")
+        logger.info(f"S3 push completed: {local_dir} -> {s3_uri}")
     except FileNotFoundError:
-        logger.info("aws CLI not found; using boto3 for S3 upload")
+        logger.info("aws CLI not found; using boto3 for two-way S3 sync")
         try:
             import boto3
             client = boto3.client("s3")
+            # 1. Pull: list and download from S3 into local_dir
+            paginator = client.get_paginator("list_objects_v2")
+            prefix_slash = f"{prefix}/" if prefix else ""
+            downloaded = 0
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix_slash):
+                for obj in page.get("Contents") or []:
+                    key = obj["Key"]
+                    if key.endswith("/"):
+                        continue
+                    rel = key[len(prefix_slash) :] if prefix_slash else key
+                    local_path = os.path.join(local_dir, rel.replace("/", os.sep))
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    client.download_file(bucket, key, local_path)
+                    downloaded += 1
+            logger.info(f"S3 pull completed via boto3: {downloaded} file(s) {s3_uri} -> {local_dir}")
+            # 2. Push: upload local files to S3
             uploaded = 0
             for root, _dirs, files in os.walk(local_dir):
                 for f in files:
@@ -827,9 +860,9 @@ def _sync_local_dir_to_s3(local_dir: str, bucket: str, prefix: str | None = None
                     key = key.replace("\\", "/")
                     client.upload_file(local_path, bucket, key)
                     uploaded += 1
-            logger.info(f"S3 upload completed via boto3: {uploaded} file(s) {local_dir} -> {s3_uri}")
+            logger.info(f"S3 push completed via boto3: {uploaded} file(s) {local_dir} -> {s3_uri}")
         except Exception as e:
-            logger.exception(f"S3 upload failed: {e}")
+            logger.exception(f"S3 sync failed: {e}")
             raise
     except subprocess.CalledProcessError as e:
         logger.exception(f"aws s3 sync failed: {e}")
@@ -1673,6 +1706,8 @@ def sync_project_to_fiftyone(
     if s3_bucket:
         s3_bucket = s3_bucket.strip()
         s3_prefix = (s3_prefix or "").strip() or None
+    # Per-version S3 prefix for crops, e.g. fiftyone/raw/12/v21/crops (used for sync and dataset build)
+    s3_crops_prefix = _s3_crops_prefix(s3_prefix, project_id, version_id) if s3_bucket else None
     logger.info(f"sync_project_to_fiftyone CALLED: project_id={project_id} version_id={version_id} api_url={api_url} port={port} s3_bucket={s3_bucket or 'none'}")
     sess = get_session(project_id, port)
     resolved_db = (
@@ -1804,10 +1839,10 @@ def sync_project_to_fiftyone(
             # 8. Persist the updated manifest
             _save_crop_manifest(project_id, version_id, updated_manifest)
 
-            # 9. Optional: sync crop images to S3 (not full images); then list S3 to build dataset below
+            # 9. Optional: two-way sync crop images with S3 (prefix = e.g. fiftyone/raw/12/v21/crops)
             if s3_bucket and os.path.isdir(crops):
                 try:
-                    _sync_local_dir_to_s3(crops, s3_bucket, s3_prefix)
+                    _sync_local_dir_with_s3(crops, s3_bucket, s3_crops_prefix)
                 except Exception as e:
                     logger.warning(f"S3 sync failed (dataset from crops still built): {e}")
 
@@ -1844,7 +1879,7 @@ def sync_project_to_fiftyone(
         # In enterprise/production, use S3 URIs for sample filepaths so FiftyOne loads from S3
         if s3_bucket:
             config["s3_bucket"] = s3_bucket
-            config["s3_prefix"] = s3_prefix or ""
+            config["s3_prefix"] = s3_crops_prefix or ""
 
         dataset_name = _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
@@ -1862,9 +1897,9 @@ def sync_project_to_fiftyone(
         # Build exactly one dataset: from S3 when enterprise (s3_bucket), otherwise from crops
         try:
             if s3_bucket:
-                logger.info(f"Building dataset {dataset_name} from S3")
-                dataset = build_fiftyone_dataset_from_s3(s3_bucket, s3_prefix, dataset_name, config=config)
-                logger.info(f"S3 dataset '{dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
+                logger.info(f" {dataset_name} from S3")
+                dataset = build_fiftyone_dataset_from_s3(s3_bucket, s3_crops_prefix, dataset_name, config=config)
+                logger.info(f"S3 dataset '{dataset_name}' built from s3://{s3_bucket}/{s3_crops_prefix or ''}")
             else:
                 logger.info(f"Building dataset {dataset_name} from crops")
                 dataset = build_fiftyone_dataset_from_crops(
