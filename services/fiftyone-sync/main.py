@@ -221,6 +221,8 @@ LAUNCHER_TEMPLATE = r"""
     .applet-header tr + tr th { padding-top: 0.75rem; }
     .applet-header .cell-controls { display: flex; align-items: center; gap: 0.5rem 1rem; flex-wrap: wrap; }
     .applet-header .force-sync-option { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.8rem; color: #b0b0b0; cursor: pointer; }
+    .sync-log-panel { display: none; margin-top: 0.5rem; max-height: 12rem; overflow: auto; background: #0d0d0d; border: 1px solid #444; border-radius: 4px; padding: 0.5rem; font-family: ui-monospace, monospace; font-size: 0.75rem; line-height: 1.3; white-space: pre-wrap; word-break: break-all; }
+    .sync-log-panel.visible { display: block; }
   </style>
 </head>
 <body>
@@ -273,6 +275,7 @@ LAUNCHER_TEMPLATE = r"""
               <span id="sync-status" class="sync-status" aria-live="polite"></span>
               <a id="fiftyone-app-link" href="#" target="_blank" rel="noopener" class="fiftyone-app-link" style="display: none;">Open FiftyOne viewer</a>
             </div>
+            <div id="sync-log-panel" class="sync-log-panel" aria-live="polite" title="Sync progress log"></div>
           </td>
         </tr>
         <tr id="s3-bucket-row" style="display: none;">
@@ -523,20 +526,43 @@ LAUNCHER_TEMPLATE = r"""
               var data = result.data;
               if (data.job_id) {
                 syncStatus.textContent = 'Sync queued. Waiting for worker…';
+                var syncLogPanel = document.getElementById('sync-log-panel');
+                if (syncLogPanel) { syncLogPanel.classList.remove('visible'); syncLogPanel.textContent = ''; }
                 var statusUrl = syncServiceUrl + '/sync/status/' + encodeURIComponent(data.job_id);
+                var logsUrl = syncServiceUrl + '/sync/logs/' + encodeURIComponent(data.job_id);
+                function updateLogPanel(cb) {
+                  fetch(logsUrl).then(function(r) { return r.ok ? r.json() : null; }).then(function(logData) {
+                    if (syncLogPanel && logData && logData.log_lines && logData.log_lines.length) {
+                      syncLogPanel.textContent = logData.log_lines.join('\n');
+                      syncLogPanel.scrollTop = syncLogPanel.scrollHeight;
+                    }
+                    if (cb) cb();
+                  }).catch(function() { if (cb) cb(); });
+                }
+                var logPanelHideTimeout = null;
+                function hideLogPanelAfterDelay() {
+                  if (logPanelHideTimeout) clearTimeout(logPanelHideTimeout);
+                  logPanelHideTimeout = setTimeout(function() {
+                    if (syncLogPanel) syncLogPanel.classList.remove('visible');
+                    logPanelHideTimeout = null;
+                  }, 30000);
+                }
                 var poll = function() {
                   fetch(statusUrl)
                     .then(function(r) { return r.json(); })
                     .then(function(s) {
                       if (s.status === 'queued' || s.status === 'started' || s.status === 'deferred') {
                         syncStatus.textContent = s.status === 'started' ? 'Sync in progress…' : 'Sync queued…';
-                        setTimeout(poll, 2500);
+                        if (syncLogPanel) syncLogPanel.classList.add('visible');
+                        updateLogPanel(function() { setTimeout(poll, 2500); });
                         return;
                       }
                       if (s.status === 'failed') {
                         syncStatus.textContent = 'Sync failed: ' + (s.error || 'Unknown error');
                         syncStatus.classList.add('error');
                         syncBtn.disabled = false;
+                        if (syncLogPanel) syncLogPanel.classList.add('visible');
+                        updateLogPanel(hideLogPanelAfterDelay);
                         return;
                       }
                       if (s.status === 'finished' && s.result) {
@@ -545,6 +571,8 @@ LAUNCHER_TEMPLATE = r"""
                           syncStatus.textContent = res.message || 'Sync failed. Please try again in a few minutes.';
                           syncStatus.classList.add('error');
                           syncBtn.disabled = false;
+                          if (syncLogPanel) syncLogPanel.classList.add('visible');
+                          updateLogPanel(hideLogPanelAfterDelay);
                           return;
                         }
                         syncStatus.textContent = res.sample_count != null
@@ -560,15 +588,26 @@ LAUNCHER_TEMPLATE = r"""
                         }
                         setTimeout(function() { syncStatus.textContent = ''; }, 5000);
                         syncBtn.disabled = false;
+                        if (syncLogPanel) syncLogPanel.classList.add('visible');
+                        updateLogPanel(hideLogPanelAfterDelay);
+                        return;
+                      }
+                      if (s.status === 'unknown') {
+                        syncStatus.textContent = 'Sync status unknown: ' + (s.error || 'Job not found');
+                        syncStatus.classList.add('error');
+                        syncBtn.disabled = false;
+                        if (syncLogPanel) syncLogPanel.classList.remove('visible');
                         return;
                       }
                       syncStatus.textContent = 'Sync: ' + (s.status || 'unknown');
-                      setTimeout(poll, 2500);
+                      if (syncLogPanel) syncLogPanel.classList.add('visible');
+                      updateLogPanel(function() { setTimeout(poll, 2500); });
                     })
                     .catch(function(err) {
                       syncStatus.textContent = 'Status check failed: ' + (err.message || 'Network error');
                       syncStatus.classList.add('error');
                       syncBtn.disabled = false;
+                      if (syncLogPanel) syncLogPanel.classList.remove('visible');
                     });
                 };
                 poll();
@@ -827,6 +866,23 @@ async def sync_status(job_id: str) -> dict:
 
     try:
         return get_job_status(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}") from e
+
+
+@app_launch.get("/sync/logs/{job_id}")
+async def sync_logs(job_id: str) -> dict:
+    """
+    Return log lines from the sync worker for the given job (from job metadata).
+    Returns {"log_lines": list[str]}. Use while polling status to show progress in the applet.
+    """
+    from rq.exceptions import NoSuchJobError
+    from sync_queue import get_job_logs
+
+    try:
+        return get_job_logs(job_id)
+    except NoSuchJobError:
+        raise HTTPException(status_code=404, detail="Job not found") from None
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"Redis unavailable: {e}") from e
 

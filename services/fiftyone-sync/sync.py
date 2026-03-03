@@ -51,6 +51,44 @@ logger.addHandler(handler)
 _DEFAULT_MEDIA_ID_BATCH_SIZE = 200
 _DEFAULT_LOCALIZATION_BATCH_SIZE = 5000
 
+# Max log lines stored in RQ job metadata for applet progress display
+_JOB_LOG_LINES_CAP = 400
+_JOB_LOG_FLUSH_EVERY_N_LINES = 10
+
+
+class _JobMetaLogHandler(logging.Handler):
+    """Logging handler that appends lines to RQ job.meta['log_lines'] for applet progress display."""
+
+    def __init__(self, job: Any, cap: int = _JOB_LOG_LINES_CAP, flush_every: int = _JOB_LOG_FLUSH_EVERY_N_LINES) -> None:
+        super().__init__()
+        self._job = job
+        self._cap = cap
+        self._flush_every = flush_every
+        self._lines: list[str] = []
+        self._formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            msg = self._formatter.format(record)
+            self._lines.append(msg)
+            if len(self._lines) > self._cap:
+                self._lines = self._lines[-self._cap:]
+            if len(self._lines) % self._flush_every == 0:
+                self._flush()
+        except Exception:  # avoid breaking the worker on log errors
+            pass
+
+    def _flush(self) -> None:
+        try:
+            self._job.meta["log_lines"] = list(self._lines)
+            self._job.save_meta()
+        except Exception:  # e.g. Redis unavailable
+            pass
+
+    def close(self) -> None:
+        self._flush()
+        super().close()
+
 
 def _test_mongodb_connection(database_uri: str, timeout_ms: int = 5000) -> None:
     """Verify MongoDB is reachable before doing expensive Tator API work.
@@ -1502,23 +1540,44 @@ def run_sync_job(
 ) -> dict[str, Any]:
     """
     Entrypoint for RQ worker: all args are serializable. Calls sync_project_to_fiftyone.
+    When run in RQ worker context, attaches a handler that writes log lines to job.meta for the applet.
     """
     from database_manager import register_project_id_name
-    register_project_id_name(project_id, project_name)
-    return sync_project_to_fiftyone(
-        project_id=project_id,
-        version_id=version_id,
-        api_url=api_url,
-        token=token,
-        port=port,
-        project_name=project_name,
-        database_uri=database_uri,
-        database_name=database_name,
-        config_path=config_path,
-        force_sync=force_sync,
-        s3_bucket=s3_bucket,
-        s3_prefix=s3_prefix,
-    )
+
+    job_meta_handler: logging.Handler | None = None
+    try:
+        from rq import get_current_job
+        job = get_current_job()
+        if job is not None:
+            job_meta_handler = _JobMetaLogHandler(job)
+            job_meta_handler.setLevel(logging.DEBUG)
+            logger.addHandler(job_meta_handler)
+    except Exception:  # rq not installed or no worker context
+        pass
+
+    try:
+        register_project_id_name(project_id, project_name)
+        return sync_project_to_fiftyone(
+            project_id=project_id,
+            version_id=version_id,
+            api_url=api_url,
+            token=token,
+            port=port,
+            project_name=project_name,
+            database_uri=database_uri,
+            database_name=database_name,
+            config_path=config_path,
+            force_sync=force_sync,
+            s3_bucket=s3_bucket,
+            s3_prefix=s3_prefix,
+        )
+    finally:
+        if job_meta_handler is not None:
+            try:
+                logger.removeHandler(job_meta_handler)
+                job_meta_handler.close()
+            except Exception:
+                pass
 
 
 def sync_project_to_fiftyone(

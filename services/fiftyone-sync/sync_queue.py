@@ -111,3 +111,15 @@ def get_job_status(job_id: str) -> dict[str, Any]:
         lines = [l.strip() for l in exc_text.strip().splitlines() if l.strip()]
         out["error"] = lines[-1] if lines else exc_text
     return out
+
+
+def get_job_logs(job_id: str) -> dict[str, Any]:
+    """
+    Return log lines stored in job metadata by the sync worker.
+    Returns {"log_lines": list[str]}. Raises on job not found or Redis error.
+    """
+    from rq.job import Job
+
+    conn = get_connection()
+    job = Job.fetch(job_id, connection=conn)
+    return {"log_lines": job.meta.get("log_lines", [])}

@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rq import Queue, Worker
 
+from database_manager import get_is_enterprise
 from sync_queue import QUEUE_NAME, _get_redis_url, get_connection
 
 
@@ -27,8 +28,9 @@ def main() -> None:
     if not url:
         print("Set REDIS_HOST or REDIS_URL to run the sync worker.", file=sys.stderr)
         sys.exit(1)
-    # Launch FiftyOne app with default port 5151
-    fo.launch_app(address='0.0.0.0', port=5151)
+    # Launch FiftyOne app only when not enterprise (enterprise uses its own app; no local MongoDB)
+    if not get_is_enterprise():
+        fo.launch_app(address='0.0.0.0', port=5151)
     conn = get_connection()
     queue = Queue(QUEUE_NAME, connection=conn)
     worker = Worker([queue], connection=conn)
