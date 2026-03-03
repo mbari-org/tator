@@ -130,7 +130,14 @@ def _compute_embeddings_via_service(
                             err = out.get("error", "unknown")
                             raise RuntimeError(f"Job failed: {err}")
                         if status == "done":
-                            result = out.get("result") or {}
+                            raw_result = out.get("result")
+                            if not isinstance(raw_result, dict):
+                                if raw_result is not None:
+                                    logger.warning(
+                                        f"Poll response 'result' is not a dict (type={type(raw_result).__name__}); using top-level 'embeddings' if present"
+                                    )
+                                raw_result = {}
+                            result = raw_result
                             emb = result.get("embeddings") or out.get("embeddings")
                             if isinstance(emb, list) and len(emb) > 0:
                                 all_embeddings[batch_idx] = (
