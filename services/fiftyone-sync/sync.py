@@ -1889,11 +1889,10 @@ def sync_project_to_fiftyone(
         # Optional: build dataset from S3 (parent folder = class name)
         if s3_bucket:
             try:
-                s3_dataset_name = dataset_name + "_raw"
                 build_fiftyone_dataset_from_s3(
-                    s3_bucket, s3_prefix, s3_dataset_name, config=config,
+                    s3_bucket, s3_prefix, dataset_name, config=config,
                 )
-                logger.info(f"S3 dataset '{s3_dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
+                logger.info(f"S3 dataset '{dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
             except Exception as e:
                 logger.warning(f"Build dataset from S3 failed (crop dataset unchanged): {e}")
 
