@@ -894,7 +894,7 @@ async def sync_to_tator(
     api_url: str = Query(..., description="Tator REST API base URL"),
     token: str = Query(..., description="Tator API token"),
     port: int = Query(..., description="Port for this project"),
-    dataset_name: str | None = Query(None, description="FiftyOne dataset name (default: get_project(project_id).name + '_' + version name)"),
+    dataset_name: str | None = Query(None, description="FiftyOne dataset name (default: project_name_v{version_id}_{port})"),
     label_attr: str = Query("Label", description="Tator attribute name for label"),
     score_attr: str | None = Query(None, description="Tator attribute name for score/confidence; omit or empty to skip"),
     debug: bool = Query(False, description="Print per-sample SKIP/UPDATE debug (or set FIFTYONE_SYNC_DEBUG=1)"),

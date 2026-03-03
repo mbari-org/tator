@@ -251,7 +251,7 @@ Optional query param **`database_name`** on `GET /launch` and `POST /sync` overr
 | `config_path` | no | Path to YAML/JSON config file for dataset build |
 | `launch_app` | no | Launch FiftyOne app after sync (default: true) |
 
-**Sync-from-Tator flow (dashboard):** The launcher template calls `POST /sync`, then opens the FiftyOne app in a new tab. The frontend opens the **dataset URL** (e.g. `http://host:port/datasets/MyProject_MyVersion`) using `dataset_name` from the response so the App loads the synced dataset directly. The default dataset name is `get_project(project_id).name + "_" + version_name` (from the Tator API).
+**Sync-from-Tator flow (dashboard):** The launcher template calls `POST /sync`, then opens the FiftyOne app in a new tab. The frontend opens the **dataset URL** (e.g. `http://host:port/datasets/MyProject_v66_5151`) using `dataset_name` from the response so the App loads the synced dataset directly. The dataset name is always `project_name + "_v" + version_id + "_" + port` (e.g. `MyProject_v66_5151`). It cannot be overridden via config.
 
 ### Config file (YAML/JSON)
 
@@ -261,11 +261,12 @@ Use `config_path` to pass a config file path:
 media_id_batch_size: 200              # chunk size for get_media_list_by_id
 localization_batch_size: 5000         # page size for localization list API
 
-dataset_name: tator_project_dataset
 include_classes: [Larvacean, Copepod]   # optional: filter labels
 image_extensions: ["*.png", "*.jpg"]
 max_samples: 500                         # optional: limit for testing
 ```
+
+The FiftyOne dataset name is always `project_name_v{version_id}_{port}` and cannot be set in config.
 
 ### Embeddings and UMAP visualization
 
@@ -309,7 +310,7 @@ Labels come from `attributes.Label` (or `attributes.label`) in localizations.
 | `version_id` | yes | Tator version ID (localizations must be in this version) |
 | `api_url` | yes | Tator REST API base URL |
 | `token` | yes | Tator API token |
-| `dataset_name` | no | FiftyOne dataset name (default: `get_project(project_id).name + "_" + version name`) |
+| `dataset_name` | no | FiftyOne dataset name (default: `project_name_v{version_id}_{port}`) |
 
 ```bash
 curl -X POST "http://localhost:8001/sync-to-tator?project_id=4&version_id=1&api_url=https://tator.example.com&token=YOUR_TOKEN"

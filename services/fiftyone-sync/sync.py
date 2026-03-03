@@ -885,7 +885,7 @@ def build_fiftyone_dataset_from_s3(
         raise ValueError(f"No image files found in {s3_dir} (extensions: {list(ext_set)})")
     logger.info(f"Collected {len(samples)} samples from S3 for dataset {dataset_name}")
 
-    if fo.dataset_exists(dataset_name):
+    if dataset_name in fo.list_datasets():
         dataset = fo.load_dataset(dataset_name)
         dataset.persistent = True
         dataset.clear()
@@ -1373,9 +1373,8 @@ def build_fiftyone_dataset_from_crops(
 
     logger.info(f"Collected {len(samples)} samples for dataset")
 
-    # Handle existing dataset: always reconcile, never delete (use dataset_exists so we
-    # only consider the current database, avoiding duplicate names across DBs).
-    if fo.dataset_exists(dataset_name): 
+    # Handle existing dataset: always reconcile, never delete
+    if dataset_name in fo.list_datasets(): 
         logger.info(f"Reconcile: loading dataset {dataset_name}...")
         dataset = fo.load_dataset(dataset_name)
         dataset.persistent = True  # Ensure dataset persists in MongoDB after session ends
@@ -1412,25 +1411,21 @@ def _sanitize_dataset_name(name: str) -> str:
 
 
 def _default_dataset_name(api: Any, project_id: int, version_id: int | None) -> str:
-    """Default FiftyOne dataset name: project.name + '_' + version_name (from Tator API)."""
+    """FiftyOne dataset name (base): project_name + '_v' + version_id. Port is appended by _dataset_name_with_port."""
     try:
         project = api.get_project(project_id)
         project_name = _sanitize_dataset_name(project.name) if project.name else f"project_{project_id}"
     except Exception:
         project_name = f"project_{project_id}"
     if version_id is not None:
-        try:
-            version = api.get_version(version_id)
-            version_name = _sanitize_dataset_name(version.name) if version.name else f"v{version_id}"
-        except Exception:
-            version_name = f"v{version_id}"
+        version_part = f"v{version_id}"
     else:
-        version_name = "default"
-    return f"{project_name}_{version_name}"
+        version_part = "default"
+    return f"{project_name}_{version_part}"
 
 
 def _dataset_name_with_port(dataset_name: str, port: int) -> str:
-    """Append port to dataset name if not already present (e.g. 901902-uavs_Baseline -> 901902-uavs_Baseline_5151)."""
+    """Append port to dataset name if not already present (e.g. project_v66 -> project_v66_5151)."""
     name = (dataset_name or "").strip()
     if not name:
         return name
@@ -1507,10 +1502,13 @@ def sync_edits_to_tator(
     port_suffix = f"_{port}"
 
     def _resolve_dataset(requested: str) -> str | None:
-        """Return the actual dataset name: exact match first, then project+port match."""
+        """Return the actual dataset name: exact match first, then name+port, then project+port match."""
         available = fo.list_datasets()
         if requested in available:
             return requested
+        # Default name has no port; stored name is base + port_suffix (e.g. project_v66_5151)
+        if (requested + port_suffix) in available:
+            return requested + port_suffix
         matches = [d for d in available
                    if d.startswith(project_prefix) and d.endswith(port_suffix)]
         if not matches:
@@ -1682,10 +1680,6 @@ def sync_project_to_fiftyone(
         or (sess.get("database_name") if sess else None)
     )
     resolved_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
-    # Ensure we always use a single database for this (project_id, port) so the same
-    # dataset name is never created in two different databases.
-    if not get_is_enterprise() and resolved_db is None:
-        resolved_db = get_database_name(project_id, port, project_name=project_name)
     if not get_is_enterprise():
         fo.config.database_uri = resolved_uri
         fo.config.database_name = resolved_db
@@ -1852,7 +1846,7 @@ def sync_project_to_fiftyone(
             config["s3_bucket"] = s3_bucket
             config["s3_prefix"] = s3_prefix or ""
 
-        dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
+        dataset_name = _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
 
         # Set env so FiftyOne app subprocess uses the same database (only when not production)
@@ -1889,10 +1883,11 @@ def sync_project_to_fiftyone(
         # Optional: build dataset from S3 (parent folder = class name)
         if s3_bucket:
             try:
+                s3_dataset_name = dataset_name
                 build_fiftyone_dataset_from_s3(
-                    s3_bucket, s3_prefix, dataset_name, config=config,
+                    s3_bucket, s3_prefix, s3_dataset_name, config=config,
                 )
-                logger.info(f"S3 dataset '{dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
+                logger.info(f"S3 dataset '{s3_dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
             except Exception as e:
                 logger.warning(f"Build dataset from S3 failed (crop dataset unchanged): {e}")
 
@@ -2084,7 +2079,7 @@ def main() -> None:
         config["media_attributes_map"] = _build_media_attributes_map(
             api, project_id, localizations_path, media_id_batch_size=media_id_batch_size_cli,
         )
-        dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
+        dataset_name = _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
         build_fiftyone_dataset_from_crops(
             crops_dir=crops,
