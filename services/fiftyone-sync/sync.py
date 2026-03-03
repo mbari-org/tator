@@ -1859,15 +1859,21 @@ def sync_project_to_fiftyone(
             api, project_id, localizations_path, media_id_batch_size=media_id_batch_size,
         )
 
+        # Build exactly one dataset: from S3 when enterprise (s3_bucket), otherwise from crops
         try:
-            logger.info(f"Building dataset {dataset_name}")
-            dataset = build_fiftyone_dataset_from_crops(
-                crops_dir=crops,
-                localizations_jsonl_path=localizations_path,
-                dataset_name=dataset_name,
-                config=config,
-                download_dir=dl_dir or None,
-            )
+            if s3_bucket:
+                logger.info(f"Building dataset {dataset_name} from S3")
+                dataset = build_fiftyone_dataset_from_s3(s3_bucket, s3_prefix, dataset_name, config=config)
+                logger.info(f"S3 dataset '{dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
+            else:
+                logger.info(f"Building dataset {dataset_name} from crops")
+                dataset = build_fiftyone_dataset_from_crops(
+                    crops_dir=crops,
+                    localizations_jsonl_path=localizations_path,
+                    dataset_name=dataset_name,
+                    config=config,
+                    download_dir=dl_dir or None,
+                )
         except Exception as e:
             logger.info(f"Dataset build failed: {e}")
             return {
@@ -1879,17 +1885,6 @@ def sync_project_to_fiftyone(
                 "saved_localizations_path": localizations_path or None,
                 "saved_crops_dir": crops or None,
             }
-
-        # Optional: build a second dataset from S3 (suffix _raw) so the crop dataset is not overwritten
-        if s3_bucket:
-            try:
-                s3_dataset_name = f"{dataset_name}_vxl51"
-                build_fiftyone_dataset_from_s3(
-                    s3_bucket, s3_prefix, s3_dataset_name, config=config,
-                )
-                logger.info(f"S3 dataset '{s3_dataset_name}' built from s3://{s3_bucket}/{s3_prefix or ''}")
-            except Exception as e:
-                logger.warning(f"Build dataset from S3 failed (crop dataset unchanged): {e}")
 
         logger.info(f"sync_project_to_fiftyone done: dataset={dataset_name}")
         logger.info(
