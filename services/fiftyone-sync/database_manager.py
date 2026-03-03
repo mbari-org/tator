@@ -78,15 +78,9 @@ def get_vss_project(project_name: str, port: int) -> str | None:
 
 
 def get_is_enterprise() -> bool:
-    """Return is_enterprise from config (enables S3 upload when True). Default False when no config."""
+    """Return is_enterprise from config. When True: enables S3 upload and fo.config.database_uri is not set (FiftyOne uses its own config). Default False when no config."""
     _load_config()
     return getattr(_yaml_config, "is_enterprise", False) if _yaml_config else False
-
-
-def get_is_production() -> bool:
-    """Return is_production from config. When True, fo.config.database_uri is not set (FiftyOne uses its own config)."""
-    _load_config()
-    return getattr(_yaml_config, "is_production", False) if _yaml_config else False
 
 
 def get_s3_config(

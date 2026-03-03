@@ -31,7 +31,6 @@ from database_manager import (
     get_database_name,
     get_database_uri,
     get_is_enterprise,
-    get_is_production,
     get_port_for_project,
     get_session,
     get_s3_config,
@@ -1478,7 +1477,7 @@ def sync_edits_to_tator(
     if db_entry is None:
         raise ValueError(f"No database entry found for project_id={project_id} and port={port}")
     db_name = database_name_from_uri(db_entry.uri)
-    if not get_is_production():
+    if not get_is_enterprise():
         fo.config.database_uri = db_entry.uri
         fo.config.database_name = db_name
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
@@ -1521,12 +1520,12 @@ def sync_edits_to_tator(
     fallback_db = f"{os.environ.get('FIFTYONE_DATABASE_DEFAULT', 'fiftyone_project')}_{project_id}"
     resolved = _resolve_dataset(ds_name)
     if resolved is None and db_name != fallback_db:
-        if not get_is_production():
+        if not get_is_enterprise():
             fo.config.database_name = fallback_db
             os.environ["FIFTYONE_DATABASE_NAME"] = fallback_db
         resolved = _resolve_dataset(ds_name)
     if resolved is None:
-        if not get_is_production():
+        if not get_is_enterprise():
             fo.config.database_name = db_name
         raise ValueError(
             f"No dataset matching project '{project_prefix}' with port {port} found in database '{db_name}' (or '{fallback_db}'). "
@@ -1678,7 +1677,7 @@ def sync_project_to_fiftyone(
         or (sess.get("database_name") if sess else None)
     )
     resolved_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
-    if not get_is_production():
+    if not get_is_enterprise():
         fo.config.database_uri = resolved_uri
         fo.config.database_name = resolved_db
         os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
@@ -1848,7 +1847,7 @@ def sync_project_to_fiftyone(
         dataset_name = _dataset_name_with_port(dataset_name, port)
 
         # Set env so FiftyOne app subprocess uses the same database (only when not production)
-        if not get_is_production():
+        if not get_is_enterprise():
             os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
             os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
@@ -2068,7 +2067,7 @@ def main() -> None:
         _cleanup_download_dir(project_id)
 
     if crops and localizations_path and os.path.isdir(crops):
-        if not get_is_production():
+        if not get_is_enterprise():
             fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name_cli)
             fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
             os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri

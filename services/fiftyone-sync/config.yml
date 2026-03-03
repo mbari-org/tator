@@ -2,13 +2,9 @@
 media_id_batch_size: 200
 localization_batch_size: 5000
 
-# When true, enable S3 upload (applet shows S3 bucket/prefix; sync uploads crop images to S3, not full images).
-# When false, S3 upload is disabled and the S3 row is hidden in the applet.
+# When true (enterprise): enable S3 upload and do not set fo.config.database_uri/database_name
+# (FiftyOne uses its own config). When false: S3 upload disabled, sync sets database per project/port.
 is_enterprise: false
-
-# When true (production), fo.config.database_uri and fo.config.database_name are not set;
-# FiftyOne uses its own config. When false, sync sets them per project/port.
-# is_production: false
 
 # Optional: embeddings and UMAP; batch_size is per-request size for embed service
 # embeddings:
