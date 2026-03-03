@@ -776,9 +776,9 @@ def _ensure_s3_bucket_exists(bucket: str) -> None:
         code = e.response.get("Error", {}).get("Code", "")
         if code != "404":
             raise
-    region = client.meta.region_name or "us-east-1"
+    region = client.meta.region_name or "us-west-2"
     try:
-        if region == "us-east-1":
+        if region == "us-west-2":
             client.create_bucket(Bucket=bucket)
         else:
             client.create_bucket(
@@ -806,6 +806,7 @@ def _sync_local_dir_to_s3(local_dir: str, bucket: str, prefix: str | None = None
     _ensure_s3_bucket_exists(bucket)
 
     try:
+        logger.info(f"Running aws s3 sync: {local_dir} -> {s3_uri}...")
         subprocess.run(
             ["aws", "s3", "sync", local_dir, s3_uri, "--only-show-errors"],
             check=True,
@@ -1119,6 +1120,23 @@ def _media_id_to_stem_from_crops(crops_dir: str) -> dict[int, str]:
     return out
 
 
+def _crop_filepath_for_sample(
+    media_stem: str,
+    elemental_id: str,
+    crops_dir: str,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
+) -> str:
+    """Return filepath for a crop sample: S3 URI when s3_bucket is set (enterprise/production), else local path."""
+    if s3_bucket and str(s3_bucket).strip():
+        bucket = s3_bucket.strip()
+        prefix = (s3_prefix or "").strip().rstrip("/")
+        if prefix:
+            return f"s3://{bucket}/{prefix}/{media_stem}/{elemental_id}.png"
+        return f"s3://{bucket}/{media_stem}/{elemental_id}.png"
+    return os.path.abspath(os.path.join(crops_dir, media_stem, f"{elemental_id}.png"))
+
+
 def _create_sample_from_loc(
     loc: dict,
     crops_dir: str,
@@ -1127,6 +1145,8 @@ def _create_sample_from_loc(
     api_url: str | None = None,
     project_id: int | None = None,
     version_id: int | None = None,
+    s3_bucket: str | None = None,
+    s3_prefix: str | None = None,
 ) -> fo.Sample | None:
     """Create a FiftyOne sample from a localization (for reconcile add-new)."""
     elemental_id = loc.get("elemental_id") or loc.get("id")
@@ -1136,8 +1156,8 @@ def _create_sample_from_loc(
     label = _get_label_from_loc(loc)
     if include_classes and label not in include_classes:
         return None
-    filepath = os.path.abspath(os.path.join(crops_dir, media_stem, f"{elemental_id}.png"))
-    if not os.path.exists(filepath):
+    filepath = _crop_filepath_for_sample(media_stem, elemental_id, crops_dir, s3_bucket=s3_bucket, s3_prefix=s3_prefix)
+    if not (s3_bucket and s3_bucket.strip()) and not os.path.exists(filepath):
         return None
     sample = fo.Sample(filepath=filepath)
     sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
@@ -1231,9 +1251,12 @@ def reconcile_dataset_with_tator(
         api_url = config.get("api_url")
         project_id = config.get("project_id")
         version_id = config.get("version_id")
+        s3_bucket = config.get("s3_bucket")
+        s3_prefix = config.get("s3_prefix")
         sample = _create_sample_from_loc(
             loc, crops_dir, media_stem, include_classes,
             api_url=api_url, project_id=project_id, version_id=version_id,
+            s3_bucket=s3_bucket, s3_prefix=s3_prefix,
         )
         if sample:
             dataset.add_samples([sample])
@@ -1308,7 +1331,12 @@ def build_fiftyone_dataset_from_crops(
             if include_classes and label not in include_classes:
                 continue
 
-            sample = fo.Sample(filepath=os.path.abspath(filepath))
+            s3_bucket = config.get("s3_bucket")
+            s3_prefix = config.get("s3_prefix")
+            sample_filepath = _crop_filepath_for_sample(
+                media_stem, elemental_id, crops_dir, s3_bucket=s3_bucket, s3_prefix=s3_prefix,
+            )
+            sample = fo.Sample(filepath=sample_filepath)
             sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
             sample["elemental_id"] = elemental_id
             sample["media_stem"] = media_stem
@@ -1815,6 +1843,10 @@ def sync_project_to_fiftyone(
         config["source_url"] = api_url.rstrip("/")
         config["project_id"] = project_id
         config["version_id"] = version_id
+        # In enterprise/production, use S3 URIs for sample filepaths so FiftyOne loads from S3
+        if s3_bucket:
+            config["s3_bucket"] = s3_bucket
+            config["s3_prefix"] = s3_prefix or ""
 
         dataset_name = config.get("dataset_name") or _default_dataset_name(api, project_id, version_id)
         dataset_name = _dataset_name_with_port(dataset_name, port)
