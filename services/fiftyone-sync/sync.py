@@ -1268,16 +1268,12 @@ def reconcile_dataset_with_tator(
 
 
 def _get_label_from_loc(loc: dict) -> str:
-    """Extract label from localization attributes (Label, label) or fallback."""
+    """Extract label from localization attributes (Label, label) or fallback to Unknown."""
     attrs = loc.get("attributes") or {}
     label = attrs.get("Label") or attrs.get("label")
-    if label:
+    if label is not None and str(label).strip():
         return str(label)
-    media_stem = None
-    media_id = loc.get("media")
-    if media_id is not None:
-        media_stem = str(media_id)
-    return media_stem or "unknown"
+    return "Unknown"
 
 
 def build_fiftyone_dataset_from_crops(
@@ -1326,7 +1322,7 @@ def build_fiftyone_dataset_from_crops(
             elemental_id = Path(filepath).stem
 
             loc = loc_index.get(elemental_id)
-            label = _get_label_from_loc(loc) if loc else media_stem or "unknown"
+            label = _get_label_from_loc(loc) if loc else (media_stem or "Unknown")
 
             if include_classes and label not in include_classes:
                 continue
