@@ -30,6 +30,7 @@ from database_manager import (
     get_database_entry_or_enterprise_default,
     get_database_name,
     get_database_uri,
+    get_is_enterprise,
     get_port_for_project,
     get_session,
     get_s3_config,
@@ -68,6 +69,20 @@ def _test_mongodb_connection(database_uri: str, timeout_ms: int = 5000) -> None:
         ) from exc
     finally:
         client.close()
+
+
+def _test_fiftyone_connection() -> None:
+    """Verify FiftyOne backend is reachable via a basic API call (e.g. list datasets).
+
+    Used when is_enterprise=True instead of direct MongoDB check.
+    Raises ConnectionError if the backend cannot be reached.
+    """
+    try:
+        fo.list_datasets()
+    except Exception as exc:
+        raise ConnectionError(
+            f"FiftyOne connection check failed (list_datasets): {exc}"
+        ) from exc
 
  
 def _json_serial(obj: Any) -> Any:
@@ -1370,7 +1385,10 @@ def sync_edits_to_tator(
     os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
     os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
 
-    _test_mongodb_connection(fo.config.database_uri)
+    if get_is_enterprise():
+        _test_fiftyone_connection()
+    else:
+        _test_mongodb_connection(fo.config.database_uri)
 
     host = api_url.rstrip("/")
     api = tator.get_api(host, token)
@@ -1542,11 +1560,15 @@ def sync_project_to_fiftyone(
     logger.info(f"database_uri={fo.config.database_uri} database_name={resolved_db}")
 
     try:
-        _test_mongodb_connection(fo.config.database_uri)
-        logger.info("MongoDB connection OK")
+        if get_is_enterprise():
+            _test_fiftyone_connection()
+            logger.info("FiftyOne connection OK (list_datasets)")
+        else:
+            _test_mongodb_connection(fo.config.database_uri)
+            logger.info("MongoDB connection OK")
     except ConnectionError as exc:
-        logger.error(f"MongoDB pre-flight check failed: {exc}")
-        raise RuntimeError(f"MongoDB pre-flight check failed: {exc}") from exc
+        logger.error(f"Pre-flight connection check failed: {exc}")
+        raise RuntimeError(f"Pre-flight connection check failed: {exc}") from exc
 
     lock_key = get_sync_lock_key(resolved_db, project_id, version_id)
     if not try_acquire_sync_lock(lock_key):
