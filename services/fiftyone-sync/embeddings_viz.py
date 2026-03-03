@@ -61,7 +61,7 @@ def _compute_embeddings_via_service(
     # Use local_filepath when present (is_enterprise/S3 mode) so the embed service can open files locally
     path_pairs = []
     for s in samples:
-        path_to_open = s.get("local_filepath") or s["filepath"]
+        path_to_open = s["local_filepath"] if "local_filepath" in s else s["filepath"]
         if os.path.isfile(path_to_open):
             path_pairs.append((path_to_open, s["filepath"]))
     paths_to_open = [p for p, _ in path_pairs]
