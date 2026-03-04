@@ -911,6 +911,7 @@ def build_fiftyone_dataset_from_s3(
         sample["ground_truth"] = fo.Classification(label=label_name, confidence=1.0)
         sample["elemental_id"] = elemental_id
         sample["label"] = label_name
+        sample["local_filepath"] = s3_uri.replace("s3://", "")
         sample.tags.append(label_name)
         samples.append(sample)
 
@@ -1892,21 +1893,24 @@ def sync_project_to_fiftyone(
             api, project_id, localizations_path, media_id_batch_size=media_id_batch_size,
         )
 
-        # Build exactly one dataset: from S3 when enterprise (s3_bucket), otherwise from crops
+        # Build dataset from crops + localizations; filepath is S3 URI when s3_bucket in config
         try:
+            logger.info(f"Building dataset {dataset_name} from crops")
+            dataset = build_fiftyone_dataset_from_crops(
+                crops_dir=crops,
+                localizations_jsonl_path=localizations_path,
+                dataset_name=dataset_name,
+                config=config,
+                download_dir=dl_dir or None,
+            )
             if s3_bucket:
-                logger.info(f" {dataset_name} from S3")
-                dataset = build_fiftyone_dataset_from_s3(s3_bucket, s3_crops_prefix, dataset_name, config=config)
-                logger.info(f"S3 dataset '{dataset_name}' built from s3://{s3_bucket}/{s3_crops_prefix or ''}")
-            else:
-                logger.info(f"Building dataset {dataset_name} from crops")
-                dataset = build_fiftyone_dataset_from_crops(
-                    crops_dir=crops,
-                    localizations_jsonl_path=localizations_path,
-                    dataset_name=dataset_name,
-                    config=config,
-                    download_dir=dl_dir or None,
-                )
+                logger.info(f"Dataset '{dataset_name}' filepaths use s3://{s3_bucket}/{s3_crops_prefix or ''}")
+                # Add a new field to the samples called "local_filepath" and format with s3://{s3_bucket}/{s3_crops_prefix or ''}
+                for sample in dataset:
+                    new_filepath = sample['filepath'].replace("tmp/", "")
+                    sample["local_filepath"] = f"s3://{s3_bucket}/{s3_crops_prefix or ''}/{new_filepath}"
+                    logger.info(f"Sample '{sample['filepath']}' -> '{sample['local_filepath']}'")
+                dataset.save()
         except Exception as e:
             logger.info(f"Dataset build failed: {e}")
             return {
@@ -1976,7 +1980,6 @@ def sync_project_to_fiftyone(
                         batch_size=batch_size,
                         project_name=vss_project,
                         service_url=embeddings_config.get("service_url") or os.environ.get("FASTVSS_API_URL"),
-                        is_enterprise=get_is_enterprise(),
                     )
                     logger.info(f"Embeddings and UMAP completed for dataset '{dataset_name}'")
             except ImportError as e:

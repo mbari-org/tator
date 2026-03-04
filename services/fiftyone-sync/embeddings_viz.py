@@ -41,17 +41,13 @@ def _compute_embeddings_via_service(
     service_url: str,
     batch_size: int = 32,
     poll_interval: float = 2.0,
-    poll_timeout: float = 300.0,
-    is_enterprise: bool = False,
+    poll_timeout: float = 300.0
 ) -> None:
     """
     Compute embeddings by sending sample images to the embed service and writing results to the dataset.
 
     Service: POST {service_url}/embed/{project_name} (no trailing slash) with files -> job_id
              then GET {service_url}/predict/job/{job_id}/{project_name} until embeddings returned.
-
-    When is_enterprise is True, only local_filepath is used (sample filepath may be S3); otherwise
-    uses local_filepath when present, else filepath.
     """
     import fiftyone as fo
     import httpx
@@ -69,7 +65,7 @@ def _compute_embeddings_via_service(
         else:
             continue
         if os.path.isfile(path_to_open):
-            path_pairs.append((path_to_open, s["filepath"]))
+            path_pairs.append((path_to_open, s["local_filepath"]))
     paths_to_open = [p for p, _ in path_pairs]
     sample_filepaths = [fp for _, fp in path_pairs]
 
@@ -213,8 +209,7 @@ def compute_embeddings_and_viz(
     force_umap: bool = False,
     batch_size: Optional[int] = None,
     project_name: Optional[str] = None,
-    service_url: Optional[str] = None,
-    is_enterprise: bool = False,
+    service_url: Optional[str] = None
 ) -> None:
     """
     Compute embeddings and UMAP visualization with caching.
@@ -235,7 +230,6 @@ def compute_embeddings_and_viz(
         batch_size: Batch size for embed service requests (default 32)
         project_name: Project key for embed service URL path (usually project ID; required when using service)
         service_url: Base URL for embed service (default FASTVSS_API_URL or http://localhost:8000)
-        is_enterprise: When True, use only local_filepath for the embed service (filepath may be S3).
     """
     import fiftyone as fo
     import fiftyone.brain as fob
@@ -263,8 +257,7 @@ def compute_embeddings_and_viz(
             project_name=project_name,
             embeddings_field=embeddings_field,
             service_url=base_url,
-            batch_size=batch_size or 32,
-            is_enterprise=is_enterprise,
+            batch_size=batch_size or 32
         )
 
     # Reload so exists() and brain see the persisted embeddings
