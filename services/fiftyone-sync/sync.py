@@ -1366,9 +1366,8 @@ def build_fiftyone_dataset_from_crops(
             sample_filepath = _crop_filepath_for_sample(
                 media_stem, elemental_id, crops_dir, s3_bucket=s3_bucket, s3_prefix=s3_prefix,
             )
-            sample = fo.Sample(filepath=sample_filepath)
-            if s3_bucket and str(s3_bucket).strip():
-                sample["local_filepath"] = filepath
+            sample = fo.Sample(filepath=sample_filepath) 
+            sample["local_filepath"] = filepath
             sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
             sample["elemental_id"] = elemental_id
             sample["media_stem"] = media_stem
