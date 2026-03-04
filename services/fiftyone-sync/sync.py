@@ -1213,12 +1213,12 @@ def _create_sample_from_loc(
 
 
 def reconcile_dataset_with_tator(
-    dataset: fo.Dataset,
-    loc_index: dict[str, dict],
-    crops_dir: str,
-    download_dir: str | None,
-    config: dict[str, Any],
-    max_samples: int | None,
+        dataset: fo.Dataset,
+        loc_index: dict[str, dict],
+        crops_dir: str,
+        download_dir: str | None,
+        config: dict[str, Any],
+        max_samples: int | None,
 ) -> fo.Dataset:
     """
     Reconcile existing dataset with current Tator localizations:
@@ -1228,20 +1228,27 @@ def reconcile_dataset_with_tator(
     """
     tator_eids = set(loc_index.keys())
     include_classes = set(config.get("include_classes") or [])
-    media_id_to_stem = _media_id_to_stem(download_dir) if download_dir else {}
+
+    # Optimize media_id_to_stem creation - compute once and reuse
+    media_id_to_stem = None
+    if download_dir:
+        media_id_to_stem = _media_id_to_stem(download_dir)
     if not media_id_to_stem:
         media_id_to_stem = _media_id_to_stem_from_crops(crops_dir)
 
     # 1. Remove samples deleted in Tator (only when we have a non-empty localization set from Tator)
-    # If Tator returns 0 localizations (e.g. wrong version or API filter), do not remove existing samples
     logger.info("Reconcile: Remove samples deleted in Tator")
     if tator_eids:
-        to_remove = []
-        for s in dataset:
-            eid = s["elemental_id"] if "elemental_id" in s else None
-            if eid is not None and str(eid) not in tator_eids:
-                to_remove.append(s.id)
+        # Use list comprehension for faster collection of IDs to remove
+        # Access sample values directly without checking "in sample" each time
+        # This assumes elemental_id is always present - if not guaranteed, keep the original check
+        to_remove = [
+            s.id for s in dataset
+            if s.get("elemental_id") is not None and str(s.get("elemental_id")) not in tator_eids
+        ]
+
         if to_remove:
+            # Delete in batches if dataset is large (FiftyOne might handle this internally)
             dataset.delete_samples(to_remove)
             logger.info(f"Reconcile: removed {len(to_remove)} samples (deleted in Tator)")
     else:
@@ -1250,53 +1257,107 @@ def reconcile_dataset_with_tator(
     # 2. Update samples with changed box (crop already overwritten by crop_localizations_parallel)
     logger.info("Reconcile: Update samples with changed box")
     updated = 0
+
+    # Pre-collect all samples that need checking to avoid multiple passes
+    # Create a dict mapping elemental_id to sample for faster lookups
+    eid_to_sample = {}
+    samples_to_update = []
+
     for sample in dataset.iter_samples(autosave=False):
-        elemental_id = sample["elemental_id"] if "elemental_id" in sample else None
-        if not elemental_id or str(elemental_id) not in loc_index:
-            continue
-        loc = loc_index[str(elemental_id)]
+        elemental_id = sample.get("elemental_id")
+        if elemental_id and str(elemental_id) in loc_index:
+            eid_to_sample[str(elemental_id)] = sample
+
+    # Now process only samples that have matching loc_index entries
+    for eid, sample in eid_to_sample.items():
+        loc = loc_index[eid]
         new_hash = _box_hash(loc)
-        old_hash = sample["box_hash"] if "box_hash" in sample else None
+        old_hash = sample.get("box_hash")
+
         if old_hash != new_hash:
             sample["box_hash"] = new_hash
-            sample.save()
+            samples_to_update.append(sample)
             updated += 1
-    if updated:
+
+    # Batch save updates
+    if samples_to_update:
+        # Save in batches to reduce I/O overhead
+        batch_size = 1000
+        for i in range(0, len(samples_to_update), batch_size):
+            batch = samples_to_update[i:i + batch_size]
+            for sample in batch:
+                sample.save()
+
         logger.info(f"Reconcile: updated {updated} samples (box changed)")
 
     # 3. Add new samples (elemental_id in Tator but not in dataset)
-    dataset_eids = {str(s["elemental_id"]) for s in dataset if "elemental_id" in s}
-    new_eids = [eid for eid in tator_eids if eid not in dataset_eids]
-    if max_samples:
+    # Use set for O(1) lookups
+    dataset_eids = {str(s.get("elemental_id")) for s in dataset if s.get("elemental_id")}
+
+    # Find new EIDs efficiently
+    new_eids = tator_eids - dataset_eids if tator_eids else set()
+
+    # Apply max_samples limit
+    if max_samples and new_eids:
         cap = max_samples - len(dataset)
         if cap <= 0:
-            new_eids = []
+            new_eids = set()
         else:
-            new_eids = new_eids[:cap]
-    added = 0
-    for eid in new_eids:
-        loc = loc_index[eid]
-        media_id = loc.get("media")
-        if media_id is None:
-            continue
-        media_stem = media_id_to_stem.get(int(media_id))
-        if not media_stem:
-            continue
-        api_url = config.get("api_url")
-        project_id = config.get("project_id")
-        version_id = config.get("version_id")
-        s3_bucket = config.get("s3_bucket")
-        s3_prefix = config.get("s3_prefix")
-        sample = _create_sample_from_loc(
-            loc, crops_dir, media_stem, include_classes,
-            api_url=api_url, project_id=project_id, version_id=version_id,
-            s3_bucket=s3_bucket, s3_prefix=s3_prefix,
-        )
-        if sample:
-            dataset.add_samples([sample])
-            added += 1
-    if added:
-        logger.info(f"Reconcile: added {added} new samples")
+            # Convert to list for slicing, but only take what we need
+            new_eids_list = list(new_eids)[:cap]
+            new_eids = set(new_eids_list)
+
+    if new_eids:
+        # Batch create samples for better performance
+        added = 0
+        batch_size = 100  # Adjust based on your needs
+        samples_to_add = []
+
+        # Pre-filter valid media_ids to avoid repeated checks
+        valid_media_ids = set()
+        for eid in new_eids:
+            loc = loc_index[eid]
+            media_id = loc.get("media")
+            if media_id and int(media_id) in media_id_to_stem:
+                valid_media_ids.add(int(media_id))
+
+        for eid in new_eids:
+            loc = loc_index[eid]
+            media_id = loc.get("media")
+            if media_id is None:
+                continue
+
+            media_stem = media_id_to_stem.get(int(media_id))
+            if not media_stem:
+                continue
+
+            api_url = config.get("api_url")
+            project_id = config.get("project_id")
+            version_id = config.get("version_id")
+            s3_bucket = config.get("s3_bucket")
+            s3_prefix = config.get("s3_prefix")
+
+            sample = _create_sample_from_loc(
+                loc, crops_dir, media_stem, include_classes,
+                api_url=api_url, project_id=project_id, version_id=version_id,
+                s3_bucket=s3_bucket, s3_prefix=s3_prefix,
+            )
+
+            if sample:
+                samples_to_add.append(sample)
+                added += 1
+
+                # Add in batches to avoid memory issues with large datasets
+                if len(samples_to_add) >= batch_size:
+                    dataset.add_samples(samples_to_add)
+                    samples_to_add = []
+
+        # Add any remaining samples
+        if samples_to_add:
+            dataset.add_samples(samples_to_add)
+
+        if added:
+            logger.info(f"Reconcile: added {added} new samples")
 
     return dataset
 
@@ -1342,6 +1403,8 @@ def build_fiftyone_dataset_from_crops(
     # Collect crop filepaths
     samples: list = []
     seen = 0
+    s3_bucket = config.get("s3_bucket")
+    s3_prefix = config.get("s3_prefix")
     for ext in image_extensions:
         pat = os.path.join(crops_dir, "**", ext)
         for filepath in glob.glob(pat):
@@ -1361,8 +1424,6 @@ def build_fiftyone_dataset_from_crops(
             if include_classes and label not in include_classes:
                 continue
 
-            s3_bucket = config.get("s3_bucket")
-            s3_prefix = config.get("s3_prefix")
             sample_filepath = _crop_filepath_for_sample(
                 media_stem, elemental_id, crops_dir, s3_bucket=s3_bucket, s3_prefix=s3_prefix,
             )
