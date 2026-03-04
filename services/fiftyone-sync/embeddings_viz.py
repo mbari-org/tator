@@ -64,19 +64,14 @@ def _compute_embeddings_via_service(
  
     path_pairs = []
     for s in samples:
-        path_to_open = s["local_filepath"]
+        if "local_filepath" in s:
+            path_to_open = s["local_filepath"]
+        else:
+            continue
         if os.path.isfile(path_to_open):
-            sample_fp = s["filepath"] if "filepath" in s else path_to_open
-            path_pairs.append((path_to_open, sample_fp))
+            path_pairs.append((path_to_open, s["filepath"]))
     paths_to_open = [p for p, _ in path_pairs]
     sample_filepaths = [fp for _, fp in path_pairs]
-    skipped = len(samples) - len(paths_to_open)
-    if skipped:
-        logger.warning(f"Skipping {skipped} missing file(s)")
-
-    if not paths_to_open:
-        logger.warning("No valid image files to embed")
-        return
 
     # Submit all batches, then poll all jobs
     num_batches = (len(paths_to_open) + batch_size - 1) // batch_size
