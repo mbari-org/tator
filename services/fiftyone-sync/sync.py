@@ -1191,9 +1191,8 @@ def _create_sample_from_loc(
     filepath = _crop_filepath_for_sample(media_stem, elemental_id, crops_dir, s3_bucket=s3_bucket, s3_prefix=s3_prefix)
     if not (s3_bucket and s3_bucket.strip()) and not os.path.exists(filepath):
         return None
-    sample = fo.Sample(filepath=filepath)
-    if s3_bucket and str(s3_bucket).strip():
-        sample["local_filepath"] = os.path.abspath(os.path.join(crops_dir, media_stem, f"{elemental_id}.png"))
+    sample = fo.Sample(filepath=filepath) 
+    sample["local_filepath"] = os.path.abspath(os.path.join(crops_dir, media_stem, f"{elemental_id}.png"))
     sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
     sample["elemental_id"] = elemental_id
     sample["media_stem"] = media_stem
