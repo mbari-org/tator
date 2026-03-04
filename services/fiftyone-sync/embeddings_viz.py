@@ -68,7 +68,7 @@ def _compute_embeddings_via_service(
     path_pairs = []
     for s in samples:
         if is_enterprise:
-            path_to_open = s.get("local_filepath")
+            path_to_open = s["local_filepath"] if "local_filepath" in s else None
         else:
             path_to_open = s["local_filepath"] if "local_filepath" in s else (s["filepath"] if "filepath" in s else None)
         if path_to_open is None or not isinstance(path_to_open, (str, bytes, os.PathLike)):
