@@ -1244,7 +1244,7 @@ def reconcile_dataset_with_tator(
         # This assumes elemental_id is always present - if not guaranteed, keep the original check
         to_remove = [
             s.id for s in dataset
-            if s.get("elemental_id") is not None and str(s.get("elemental_id")) not in tator_eids
+            if getattr(s, "elemental_id", None) is not None and str(s.elemental_id) not in tator_eids
         ]
 
         if to_remove:
@@ -1264,7 +1264,7 @@ def reconcile_dataset_with_tator(
     samples_to_update = []
 
     for sample in dataset.iter_samples(autosave=False):
-        elemental_id = sample.get("elemental_id")
+        elemental_id = getattr(sample, "elemental_id", None)
         if elemental_id and str(elemental_id) in loc_index:
             eid_to_sample[str(elemental_id)] = sample
 
@@ -1272,7 +1272,7 @@ def reconcile_dataset_with_tator(
     for eid, sample in eid_to_sample.items():
         loc = loc_index[eid]
         new_hash = _box_hash(loc)
-        old_hash = sample.get("box_hash")
+        old_hash = getattr(sample, "box_hash", None)
 
         if old_hash != new_hash:
             sample["box_hash"] = new_hash
@@ -1292,7 +1292,7 @@ def reconcile_dataset_with_tator(
 
     # 3. Add new samples (elemental_id in Tator but not in dataset)
     # Use set for O(1) lookups
-    dataset_eids = {str(s.get("elemental_id")) for s in dataset if s.get("elemental_id")}
+    dataset_eids = {str(s.elemental_id) for s in dataset if getattr(s, "elemental_id", None)}
 
     # Find new EIDs efficiently
     new_eids = tator_eids - dataset_eids if tator_eids else set()
