@@ -28,8 +28,15 @@ from embedding_service import (
     init_disk_cache,
     queue_embedding_job,
 )
-from database_manager import get_database_entry_or_enterprise_default, get_is_enterprise, get_s3_config
+from database_manager import (
+    get_database_entry_or_enterprise_default,
+    get_is_enterprise,
+    get_s3_config,
+    require_sync_config_path,
+)
 from database_uri_config import DatabaseUriConfig, database_name_from_uri
+
+require_sync_config_path()
 
 TATOR_INTERNAL_API_URL = os.environ.get("TATOR_INTERNAL_API_URL", "").strip().rstrip("/")
 
@@ -731,7 +738,7 @@ async def get_database_info(
     logger.info(f"request project_id={project_id} -> project_name={project_name!r} port={port}")
     database_entry = get_database_entry_or_enterprise_default(project_id, port, project_name=project_name)
     if database_entry is None:
-        raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
+        raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_SYNC_CONFIG_PATH and add this project.")
     out = {
         "port": database_entry.port,
         "database_name": database_name_from_uri(database_entry.uri),
@@ -804,7 +811,6 @@ async def sync(
     api_url: str = Query(..., description="Tator REST API base URL (e.g. https://tator.example.com)"),
     token: str = Query(..., description="Tator API token"),
     port: int = Query(..., description="Port for this project"),
-    config_path: str | None = Query(None, description="Path to YAML/JSON config file for dataset build"),
     force_sync: bool = Query(False, description="Force full sync; bypass cached JSONL and re-fetch media/localizations"),
     s3_bucket: str | None = Query(None, description="Optional S3 bucket for crop image upload (crops dir, not full images); bucket created if missing"),
     s3_prefix: str | None = Query(None, description="Optional S3 prefix (folder) for crop image upload"),
@@ -830,7 +836,7 @@ async def sync(
     api_url_clean = _resolve_api_url(api_url)
     database_entry = get_database_entry_or_enterprise_default(project_id, port, project_name=project_name)
     if database_entry is None:
-        raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_DATABASE_URI_CONFIG and add this project.")
+        raise HTTPException(status_code=404, detail=f"No DatabaseUriConfig entry for project_id={project_id} (project_name={project_name!r}). Set FIFTYONE_SYNC_CONFIG_PATH and add this project.")
 
     # Disable S3 upload when is_enterprise is False (config)
     if not get_is_enterprise():
@@ -846,7 +852,6 @@ async def sync(
             port=database_entry.port,
             project_name=project_name,
             database_name=database_name_from_uri(database_entry.uri),
-            config_path=config_path,
             force_sync=force_sync,
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,

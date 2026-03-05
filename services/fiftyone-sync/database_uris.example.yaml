@@ -1,5 +1,5 @@
 # Example: per-project MongoDB URI and FiftyOne app port mapping.
-# Set FIFTYONE_DATABASE_URI_CONFIG to this file path.
+# Set FIFTYONE_SYNC_CONFIG_PATH to this file path.
 #
 # Single MongoDB for project ObjectDetection:
 projects:

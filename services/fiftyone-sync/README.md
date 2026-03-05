@@ -70,10 +70,10 @@ You can optionally sync **crop images** (localization crops, not full images) fr
 
 ### config.yml
 
-Per-project S3 is configured in the same YAML file used for database URIs. Set the path via **`FIFTYONE_DATABASE_URI_CONFIG`** (e.g. `config.yml` or an absolute path). Under each project key, add optional **`s3_bucket`** and **`s3_prefix`**:
+Per-project S3 is configured in the same YAML file used for database URIs. Set the path via **`FIFTYONE_SYNC_CONFIG_PATH`** (e.g. `config.yml` or an absolute path). Under each project key, add optional **`s3_bucket`** and **`s3_prefix`**:
 
 ```yaml
-# config.yml (or the file pointed to by FIFTYONE_DATABASE_URI_CONFIG)
+# config.yml (or the file pointed to by FIFTYONE_SYNC_CONFIG_PATH)
 projects:
   "my-project-name":
     vss_project: "optional-vss-project"

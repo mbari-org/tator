@@ -19,11 +19,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from rq import Queue, Worker
 
-from database_manager import get_is_enterprise
+from database_manager import get_is_enterprise, require_sync_config_path
 from sync_queue import QUEUE_NAME, _get_redis_url, get_connection
 
 
 def main() -> None:
+    require_sync_config_path()
     url = _get_redis_url()
     if not url:
         print("Set REDIS_HOST or REDIS_URL to run the sync worker.", file=sys.stderr)

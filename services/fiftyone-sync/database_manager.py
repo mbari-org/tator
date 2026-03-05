@@ -1,15 +1,16 @@
 """
 Database manager: maps (project_id, port) to a database (URI + name) and maintains
 one unique session per (project_id, port). 
-Uses optional YAML config (FIFTYONE_DATABASE_URI_CONFIG) keyed by project name
+Uses mandatory YAML config (FIFTYONE_SYNC_CONFIG_PATH) keyed by project name
 for per-project, per-port databases.
 """
 
 from __future__ import annotations
 
-import os
-import logging
 import json
+import logging
+import os
+import sys
 from pathlib import Path
 from typing import Any
 from database_uri_config import DatabaseEntry, DatabaseUriConfig, database_name_from_uri
@@ -38,11 +39,25 @@ _yaml_config: DatabaseUriConfig | None = None
 _project_id_to_name: dict[int, str] = {}
 
 
+def require_sync_config_path() -> None:
+    """
+    Require FIFTYONE_SYNC_CONFIG_PATH to be set and point to an existing file.
+    Call at startup; aborts the process if not configured (this config is mandatory).
+    """
+    path = os.environ.get("FIFTYONE_SYNC_CONFIG_PATH", "").strip()
+    if not path:
+        print("FIFTYONE_SYNC_CONFIG_PATH is required and must be set.", file=sys.stderr)
+        sys.exit(1)
+    if not Path(path).is_file():
+        print(f"FIFTYONE_SYNC_CONFIG_PATH must point to an existing file: {path!r}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _load_config() -> dict[tuple[str, int], DatabaseEntry] | None:
     global _config, _yaml_config
     if _config is not None:
         return _config
-    path = os.environ.get("FIFTYONE_DATABASE_URI_CONFIG", "").strip()
+    path = os.environ.get("FIFTYONE_SYNC_CONFIG_PATH", "").strip()
     if not path or not Path(path).is_file():
         _config = None
         _yaml_config = None
@@ -63,7 +78,7 @@ def _load_config() -> dict[tuple[str, int], DatabaseEntry] | None:
         logger.info(f"config: {json.dumps(log_config, indent=2)}")
         return _config
     except Exception as e:
-        logger.warning(f"Failed to load FIFTYONE_DATABASE_URI_CONFIG from {path}: {e}")
+        logger.warning(f"Failed to load FIFTYONE_SYNC_CONFIG_PATH from {path}: {e}")
         _config = None
         _yaml_config = None
         return None
@@ -129,8 +144,8 @@ def get_database_entry_or_enterprise_default(
 ) -> DatabaseEntry | None:
     """
     Like get_database_entry, but for enterprise (is_enterprise=True) returns a synthetic
-    entry using port and FIFTYONE_DATABASE_URI / default naming when no config entry exists.
-    Callers can avoid requiring FIFTYONE_DATABASE_URI_CONFIG for enterprise.
+    entry using port and FIFTYONE_SYNC_CONFIG_PATH / default naming when no config entry exists.
+    Callers can avoid requiring FIFTYONE_SYNC_CONFIG_PATH for enterprise.
     """
     entry = get_database_entry(project_id, port, project_name=project_name)
     if entry is not None:

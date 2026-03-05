@@ -1691,7 +1691,6 @@ def run_sync_job(
     project_name: str,
     database_uri: str | None = None,
     database_name: str | None = None,
-    config_path: str | None = None,
     force_sync: bool = False,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
@@ -1701,6 +1700,8 @@ def run_sync_job(
     When run in RQ worker context, attaches a handler that writes log lines to job.meta for the applet.
     """
     from database_manager import register_project_id_name
+
+    logger.info(f"run_sync_job received project_id={project_id} version_id={version_id}")
 
     job_meta_handler: logging.Handler | None = None
     try:
@@ -1724,7 +1725,6 @@ def run_sync_job(
             project_name=project_name,
             database_uri=database_uri,
             database_name=database_name,
-            config_path=config_path,
             force_sync=force_sync,
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,
@@ -1747,7 +1747,6 @@ def sync_project_to_fiftyone(
     project_name: str | None = None,
     database_uri: str | None = None,
     database_name: str | None = None,
-    config_path: str | None = None,
     force_sync: bool = False,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
@@ -1801,7 +1800,8 @@ def sync_project_to_fiftyone(
             "database_name": resolved_db,
         }
 
-    # Load config early so batch sizes apply to fetch steps (see config.yml)
+    config_path = os.getenv("FIFTYONE_SYNC_CONFIG_PATH")
+    logger.info(f"config_path={config_path}")
     config: dict[str, Any] = {}
     if config_path and os.path.exists(config_path):
         try:
@@ -2095,16 +2095,16 @@ def main() -> None:
     version_id = int(version_id_str) if version_id_str else None
 
     try:
-        project_name_cli = getattr(api.get_project(project_id), "name", None) or str(project_id)
+        project_name = getattr(api.get_project(project_id), "name", None) or str(project_id)
     except Exception:
-        project_name_cli = str(project_id)
-    port = get_port_for_project(project_id, project_name=project_name_cli)
+        project_name = str(project_id)
+    port = get_port_for_project(project_id, project_name=project_name)
 
     # Load config early for batch sizes (see config.yml)
-    config_path_cli = os.getenv("CONFIG_PATH")
-    config_cli = _load_config(config_path_cli) if config_path_cli and os.path.exists(config_path_cli) else {}
-    media_id_batch_size_cli = config_cli.get("media_id_batch_size") or _DEFAULT_MEDIA_ID_BATCH_SIZE
-    localization_batch_size_cli = config_cli.get("localization_batch_size") or _DEFAULT_LOCALIZATION_BATCH_SIZE
+    config_path = os.getenv("CONFIG_PATH")
+    config = _load_config(config_path) if config_path and os.path.exists(config_path) else {}
+    media_id_batch_size_cli = config.get("media_id_batch_size") or _DEFAULT_MEDIA_ID_BATCH_SIZE
+    localization_batch_size_cli = config.get("localization_batch_size") or _DEFAULT_LOCALIZATION_BATCH_SIZE
 
     # Fetch media IDs (lightweight)
     media_ids = fetch_project_media_ids(host, token, project_id, media_ids_filter=media_ids_filter, version_id=version_id)
@@ -2164,11 +2164,11 @@ def main() -> None:
 
     if crops and localizations_path and os.path.isdir(crops):
         if not get_is_enterprise():
-            fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name_cli)
-            fo.config.database_name = get_database_name(project_id, port, project_name=project_name_cli)
+            fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name)
+            fo.config.database_name = get_database_name(project_id, port, project_name=project_name)
             os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
             os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
-        config = config_cli
+        config = config
         config["media_attributes_map"] = _build_media_attributes_map(
             api, project_id, localizations_path, media_id_batch_size=media_id_batch_size_cli,
         )

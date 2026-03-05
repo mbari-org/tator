@@ -312,7 +312,7 @@ services:
     env_file:
       - ./.env
     environment:
-      - FIFTYONE_DATABASE_URI_CONFIG=/app/fiftyone.yml
+      - FIFTYONE_SYNC_CONFIG_PATH=/app/fiftyone.yml
       - FIFTYONE_DATABASE_URI=mongodb://${MONGO_CFE_DEPLOYMENTS_USER}:${MONGO_CFE_DEPLOYMENTS_PASSWORD}@mongo-cfe-deployments:27017
       - FASTVSS_API_URL=${FASTVSS_API_URL}
       - REDIS_HOST=redis
