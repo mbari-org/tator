@@ -125,11 +125,15 @@ async def post_embed(
     """
     init_disk_cache()
     image_bytes_list: list[bytes] = []
+    local_filepaths: list[str] = []
     for f in files:
         data = await f.read()
         image_bytes_list.append(data)
+        local_filepaths.append(f.filename)
     if not image_bytes_list:
         raise HTTPException(status_code=400, detail="No images provided")
+    if not local_filepaths:
+        raise HTTPException(status_code=400, detail="No local filepaths provided")
     if not FASTVSS_BASE_URL:
         raise HTTPException(
             status_code=503,
@@ -144,7 +148,7 @@ async def post_embed(
             status_code=503,
             detail=f"Embedding service unavailable: {e!s}",
         ) from e
-    job_id = await queue_embedding_job(image_bytes_list, project=project)
+    job_id = await queue_embedding_job(image_bytes_list, local_filepaths, project=project)
     return EmbedResponse(uuid=job_id)
 
 

@@ -47,6 +47,7 @@ def is_embedding_service_available() -> bool:
 
 async def queue_embedding_job(
     image_bytes_list: list[bytes],
+    local_filepaths: list[str],
     project: str = "default",
 ) -> str:
     """
@@ -62,7 +63,10 @@ async def queue_embedding_job(
     async def run_job() -> None:
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                files = [("files", (f"img_{i}.jpg", data)) for i, data in enumerate(image_bytes_list)]
+                files = [
+                    ("files", (os.path.basename(fp), data))
+                    for fp, data in zip(local_filepaths, image_bytes_list)
+                ]
                 url = f"{FASTVSS_BASE_URL}/embeddings/{project}/"
                 resp = await client.post(url, files=files)
                 resp.raise_for_status()
