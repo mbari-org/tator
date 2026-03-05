@@ -1966,11 +1966,13 @@ def sync_project_to_fiftyone(
             )
             if s3_bucket:
                 logger.info(f"Dataset '{dataset_name}' filepaths use s3://{s3_bucket}/{s3_crops_prefix or ''}")
-                # Add a new field to the samples called "local_filepath" and format with s3://{s3_bucket}/{s3_crops_prefix or ''}
+                # S3 paths are s3://bucket/prefix/media_stem/elem.png (prefix may be empty); strip trailing slash so /tmp + remainder is correct
+                s3_prefix_for_replace = (s3_crops_prefix or "").strip().rstrip("/")
+                s3_uri_prefix = f"s3://{s3_bucket}/{s3_prefix_for_replace}" if s3_prefix_for_replace else f"s3://{s3_bucket}"
                 for sample in dataset:
-                    new_filepath = sample['filepath'].replace("tmp/", "")
-                    sample["local_filepath"] = f"s3://{s3_bucket}/{s3_crops_prefix or ''}/{new_filepath}"
-                    logger.info(f"Sample '{sample['filepath']}' -> '{sample['local_filepath']}'")
+                    local_filepath = sample['filepath'].replace(s3_uri_prefix, "/tmp")
+                    logger.info(f"Sample '{sample['filepath']}' -> '{local_filepath}'")
+                    sample['local_filepath'] = local_filepath
                 dataset.save()
         except Exception as e:
             logger.info(f"Dataset build failed: {e}")
