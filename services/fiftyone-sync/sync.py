@@ -1966,9 +1966,11 @@ def sync_project_to_fiftyone(
             )
             if s3_bucket:
                 logger.info(f"Dataset '{dataset_name}' filepaths use s3://{s3_bucket}/{s3_crops_prefix or ''}")
-                s3_root = f"s3://{s3_bucket}/{s3_crops_prefix or ''}"
+                s3_prefix_for_replace = (s3_crops_prefix or "").strip().rstrip("/")
+                s3_root = f"s3://{s3_bucket}/{s3_prefix_for_replace}" if s3_prefix_for_replace else f"s3://{s3_bucket}"
+                crops_dir_local = os.path.abspath(crops)
                 for sample in dataset:
-                    local_filepath = sample['filepath'].replace(s3_root, "/tmp")
+                    local_filepath = sample['filepath'].replace(s3_root, crops_dir_local)
                     logger.info(f"Sample '{sample['filepath']}' -> '{local_filepath}'")
                     sample['local_filepath'] = local_filepath
                 dataset.save()
