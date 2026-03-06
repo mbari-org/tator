@@ -112,93 +112,40 @@ def _compute_embeddings_via_service(
                     f"Embedding fetch failed after {EMBEDDING_FETCH_MAX_RETRIES} retries: {last_error}"
                 ) from last_error
 
-        # Phase 2: poll all jobs until every one is done (retry each poll up to EMBEDDING_FETCH_MAX_RETRIES)
-        all_embeddings: list[list] = [[] for _ in range(num_batches)]
-        pending = dict(jobs)  # batch_idx -> job_id
-        deadline = time.monotonic() + poll_timeout
-
-        while pending and time.monotonic() < deadline:
-            still_pending = {}
-            for batch_idx, job_id in pending.items():
-                poll_url = f"{base}/predict/job/{job_id}/{project_name}"
-                last_poll_error = None
-                for attempt in range(EMBEDDING_FETCH_MAX_RETRIES):
-                    try:
-                        r = client.get(poll_url)
-                        r.raise_for_status()
-                        out = r.json()
-                        status = out.get("status")
-                        if status == "failed":
-                            err = out.get("error", "unknown")
-                            raise RuntimeError(f"Job failed: {err}")
-                        if status == "done":
-                            raw_result = out.get("result")
-                            if not isinstance(raw_result, dict):
-                                if raw_result is not None:
-                                    logger.warning(
-                                        f"Poll response 'result' is not a dict (type={type(raw_result).__name__}); using top-level 'embeddings' if present"
-                                    )
-                                raw_result = {}
-                            result = raw_result
-                            emb = result.get("embeddings") or out.get("embeddings")
-                            if isinstance(emb, list) and len(emb) > 0:
-                                all_embeddings[batch_idx] = (
-                                    emb if isinstance(emb[0], (list, tuple)) else [emb]
-                                )
-                            logger.info(f"Batch {batch_idx + 1} done ({len(all_embeddings[batch_idx])} vectors)")
-                        else:
-                            still_pending[batch_idx] = job_id
-                        last_poll_error = None
+        for batch_idx, job_id in jobs:
+            poll_url = f"{base}/predict/job/{job_id}/{project_name}"
+            for attempt in range(EMBEDDING_FETCH_MAX_RETRIES):
+                try:
+                    r = client.get(poll_url)
+                    r.raise_for_status()
+                    out = r.json()
+                    status = out.get("status")
+                    if status == "failed":
+                        err = out.get("error", "unknown")
+                        raise RuntimeError(f"Job failed: {err}")
+                    if status == "done":
+                        raw_result = out.get("result")
+                        if not isinstance(raw_result, dict):
+                            logger.warning(
+                                f"Poll response 'result' is not a dict (type={type(raw_result).__name__}); {raw_result}"
+                            )
+                            break
+                        emb = raw_result.get("embeddings")
+                        start = batch_idx * batch_size
+                        end = start + batch_size
+                        for s, emb in zip(samples[start:end], emb):
+                            s[embeddings_field] = emb
                         break
-                    except Exception as e:
-                        last_poll_error = e
-                        logger.warning(
-                            f"Poll batch {batch_idx + 1} attempt {attempt + 1}/{EMBEDDING_FETCH_MAX_RETRIES} failed: {e}"
-                        )
-                if last_poll_error is not None:
-                    logger.error(
-                        f"Embedding service poll failed after {EMBEDDING_FETCH_MAX_RETRIES} retries; stopping to avoid continuing for thousands of images. Last error: {last_poll_error}"
+                    else:
+                        time.sleep(poll_interval)
+                except Exception as e:
+                    logger.warning(
+                        f"Poll batch {batch_idx + 1} attempt {attempt + 1}/{EMBEDDING_FETCH_MAX_RETRIES} failed: {e}"
                     )
-                    raise RuntimeError(
-                        f"Embedding fetch failed after {EMBEDDING_FETCH_MAX_RETRIES} poll retries: {last_poll_error}"
-                    ) from last_poll_error
-            pending = still_pending
-            if pending:
-                logger.info(f"{len(pending)}/{num_batches} batches still pending…")
-                time.sleep(poll_interval)
-
-        if pending:
-            raise TimeoutError(
-                f"Embed service: {len(pending)} batch(es) did not finish within {poll_timeout}s"
-            )
-
-    all_embeddings = [vec for batch_embs in all_embeddings for vec in batch_embs]
-
-    if len(all_embeddings) != len(sample_filepaths):
-        logger.warning(f"Got {len(all_embeddings)} embeddings for {len(sample_filepaths)} images")
-
-    # Map back to samples by filepath (canonical sample filepath, not path_to_open); store as 1D numpy arrays so FiftyOne infers VectorField
-    # (list of floats infers ListField, which brain/UMAP may not treat as embeddings)
-    fp_to_emb = dict(zip(sample_filepaths, all_embeddings))
-    if np is not None:
-        # Bulk set via set_values so schema expands to VectorField; use sample id as key
-        values_by_id = {}
-        for s in samples:
-            fp = s["filepath"]
-            if fp in fp_to_emb:
-                vec = fp_to_emb[fp]
-                values_by_id[s.id] = np.asarray(vec, dtype=np.float64)
-        if values_by_id:
-            dataset.set_values(embeddings_field, values_by_id, key_field="id", expand_schema=True)
-    else:
-        for s in samples:
-            fp = s["filepath"]
-            if fp in fp_to_emb:
-                s[embeddings_field] = fp_to_emb[fp]
-            else:
-                s[embeddings_field] = None
+                    break
+ 
         dataset.save()
-    logger.info(f"Embeddings stored in: {embeddings_field} ({len(fp_to_emb)} samples)")
+    logger.info(f"Embeddings stored in: {embeddings_field} ({len(samples)} samples)")
 
 
 def compute_embeddings_and_viz(
