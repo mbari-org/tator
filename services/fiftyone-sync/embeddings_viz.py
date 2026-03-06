@@ -82,7 +82,7 @@ def _compute_embeddings_via_service(
             files = []
             for fp in batch_paths:
                 with open(fp, "rb") as f:
-                    files.append(("files", (fp, f.read())))
+                    files.append(("files", (os.path.basename(fp), f.read())))
             url = f"{base}/embed/{project_name}"
             last_error = None
             for attempt in range(EMBEDDING_FETCH_MAX_RETRIES):
