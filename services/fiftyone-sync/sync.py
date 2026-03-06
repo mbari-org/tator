@@ -50,6 +50,9 @@ logger.addHandler(handler)
 # Fallback batch sizes when not set in config (see config.yml: media_id_batch_size, localization_batch_size)
 _DEFAULT_MEDIA_ID_BATCH_SIZE = 200
 _DEFAULT_LOCALIZATION_BATCH_SIZE = 5000
+# Max media IDs per request so URL stays under nginx request line limit (e.g. 4094 bytes).
+# Each media_id in query string is ~17 bytes; base URL + version ~500; 150 * 17 + 500 < 4094.
+_MAX_SAFE_MEDIA_ID_BATCH_SIZE = 150
 
 # Max log lines stored in RQ job metadata for applet progress display
 _JOB_LOG_LINES_CAP = 400
@@ -215,7 +218,7 @@ def _get_localization_count_from_api(
     Return total localization count from Tator API (same batching as fetch_and_save_localizations).
     Returns None on error.
     """
-    mid_batch = media_id_batch_size
+    mid_batch = min(media_id_batch_size, _MAX_SAFE_MEDIA_ID_BATCH_SIZE)
     media_id_batches: list[list[int] | None] = (
         [media_ids[i : i + mid_batch] for i in range(0, len(media_ids or []), mid_batch)]
         if media_ids else [None]
@@ -256,9 +259,16 @@ def fetch_project_media_ids(
     if version_id is not None:
         kwargs["related_attribute"] = [f"$version::{version_id}"]
     if media_ids_filter:
-        kwargs["media_id"] = media_ids_filter
-    media_list = api.get_media_list(project_id, **kwargs)
-    media_ids = [m.id for m in media_list]
+        # Chunk filter to avoid "Request Line is too large" from nginx (e.g. 4094 bytes).
+        chunk = _MAX_SAFE_MEDIA_ID_BATCH_SIZE
+        media_list = []
+        for i in range(0, len(media_ids_filter), chunk):
+            kw = {**kwargs, "media_id": media_ids_filter[i : i + chunk]}
+            media_list.extend(api.get_media_list(project_id, **kw))
+        media_ids = [m.id for m in media_list]
+    else:
+        media_list = api.get_media_list(project_id, **kwargs)
+        media_ids = [m.id for m in media_list]
     logger.info(f"Project {project_id} media count: {len(media_ids)}")
     return media_ids
 
@@ -274,6 +284,7 @@ def get_media_chunked(
     Filters out non-Media responses (API quirk). Returns list of tator.models.Media.
     """
     chunk_size = media_id_batch_size if media_id_batch_size is not None else _DEFAULT_MEDIA_ID_BATCH_SIZE
+    chunk_size = min(chunk_size, _MAX_SAFE_MEDIA_ID_BATCH_SIZE)
     logger.info(f"get_media_chunked: project_id={project_id} num_ids={len(media_ids)} chunk_size={chunk_size}")
     if not media_ids:
         logger.info("get_media_chunked: no ids, returning []")
@@ -429,12 +440,15 @@ def fetch_and_save_localizations(
     logger.info(f"Localizations JSONL will be saved to: {out_path}")
     loc_batch = localization_batch_size if localization_batch_size is not None else _DEFAULT_LOCALIZATION_BATCH_SIZE
     mid_batch = media_id_batch_size if media_id_batch_size is not None else _DEFAULT_MEDIA_ID_BATCH_SIZE
+    effective_mid_batch = min(mid_batch, _MAX_SAFE_MEDIA_ID_BATCH_SIZE)
+    if effective_mid_batch < mid_batch:
+        logger.info(f"Media ID batch size capped to {effective_mid_batch} (request line limit)")
 
     media_id_batches: list[list[int] | None] = (
-        [media_ids[i:i + mid_batch] for i in range(0, len(media_ids), mid_batch)]
+        [media_ids[i:i + effective_mid_batch] for i in range(0, len(media_ids), effective_mid_batch)]
         if media_ids else [None]
     )
-    logger.info(f"Media ID batches: {len(media_id_batches)} batch(es) of up to {mid_batch}")
+    logger.info(f"Media ID batches: {len(media_id_batches)} batch(es) of up to {effective_mid_batch}")
 
     def _version_kw() -> dict:
         return {"version": [version_id]} if version_id is not None else {}
