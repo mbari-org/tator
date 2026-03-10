@@ -67,6 +67,7 @@ def _load_config() -> dict[tuple[str, int], DatabaseEntry] | None:
         _yaml_config = DatabaseUriConfig.from_yaml_path(path)
         logger.info(f"loaded config from {path}: projects={list(_yaml_config.projects.keys())}")
         for project_name, project_config in _yaml_config.projects.items():
+            logger.info(f"project_name={project_name!r}, databases={[db.port for db in project_config.databases]}")
             for db in project_config.databases:
                 key = (project_name, db.port)
                 _config[key] = db
@@ -75,7 +76,7 @@ def _load_config() -> dict[tuple[str, int], DatabaseEntry] | None:
             f"{k[0]!r}:{k[1]}": {"uri": v.uri, "port": v.port}
             for k, v in _config.items()
         }
-        logger.info(f"config: {json.dumps(log_config, indent=2)}")
+        logger.info(f"log config: {json.dumps(log_config, indent=2)}")
         return _config
     except Exception as e:
         logger.warning(f"Failed to load FIFTYONE_SYNC_CONFIG_PATH from {path}: {e}")
@@ -84,12 +85,103 @@ def _load_config() -> dict[tuple[str, int], DatabaseEntry] | None:
         return None
 
 def get_vss_project(project_name: str, port: int) -> str | None:
-    """Return vss_project for (project_name, port) from DatabaseUriConfig, or None."""
+    """Return vss_project for (project_name, port) from DatabaseUriConfig, or None.
+    For backward compatibility: returns legacy vss_project if set, otherwise returns
+    first VSS project from vss_projects dict if only one exists."""
     _load_config()
     if not _yaml_config or not project_name or not project_name.strip():
         return None
     proj = _yaml_config.projects.get(project_name.strip())
-    return getattr(proj, "vss_project", None) if proj else None
+    if not proj:
+        return None
+    # Legacy single vss_project (backward compatibility)
+    if proj.vss_project:
+        return proj.vss_project
+    # New nested vss_projects: return first if only one exists
+    if proj.vss_projects and len(proj.vss_projects) == 1:
+        vss_config = next(iter(proj.vss_projects.values()))
+        return vss_config.vss_project
+    return None
+
+
+def get_vss_projects_list(project_name: str) -> list[dict[str, str]]:
+    """Return list of available VSS projects for a Tator project.
+    Returns list of dicts with 'key' and 'name' (vss_project value).
+    For legacy single vss_project, returns [{'key': 'default', 'name': vss_project}]."""
+    _load_config()
+    if not _yaml_config:
+        path = os.environ.get("FIFTYONE_SYNC_CONFIG_PATH", "").strip()
+        logger.warning(f"get_vss_projects_list: _yaml_config is None (FIFTYONE_SYNC_CONFIG_PATH={path!r}) — check env var is set in the API container")
+        return []
+    if not project_name or not project_name.strip():
+        return []
+    proj = _yaml_config.projects.get(project_name.strip())
+    if not proj:
+        logger.warning(f"get_vss_projects_list: project {project_name.strip()!r} not found in config; available={list(_yaml_config.projects.keys())}")
+        return []
+
+    result = []
+    # New nested vss_projects
+    if proj.vss_projects:
+        for key, vss_config in proj.vss_projects.items():
+            result.append({
+                'key': key,
+                'name': vss_config.vss_project,
+                'vss_service': vss_config.vss_service or '',
+            })
+    # Legacy single vss_project (backward compatibility)
+    elif proj.vss_project:
+        result.append({
+            'key': 'default',
+            'name': proj.vss_project,
+            'vss_service': '',
+        })
+    return result
+
+
+def get_vss_project_config(project_name: str, vss_project_key: str | None = None) -> dict[str, str | None] | None:
+    """Return VSS project configuration for a specific key.
+    Returns dict with vss_project, vss_service, s3_bucket, s3_prefix.
+    If vss_project_key is None, returns first/only VSS project or legacy config."""
+    _load_config()
+    if not _yaml_config or not project_name or not project_name.strip():
+        return None
+    proj = _yaml_config.projects.get(project_name.strip())
+    if not proj:
+        return None
+
+    # New nested vss_projects
+    if proj.vss_projects:
+        if vss_project_key:
+            vss_config = proj.vss_projects.get(vss_project_key)
+            if vss_config:
+                return {
+                    'vss_project': vss_config.vss_project,
+                    'vss_service': vss_config.vss_service,
+                    's3_bucket': vss_config.s3_bucket,
+                    's3_prefix': vss_config.s3_prefix,
+                }
+        else:
+            # No key specified, return first if only one exists
+            if len(proj.vss_projects) == 1:
+                vss_config = next(iter(proj.vss_projects.values()))
+                return {
+                    'vss_project': vss_config.vss_project,
+                    'vss_service': vss_config.vss_service,
+                    's3_bucket': vss_config.s3_bucket,
+                    's3_prefix': vss_config.s3_prefix,
+                }
+
+    # Legacy single vss_project (backward compatibility)
+    if proj.vss_project:
+        return {
+            'vss_project': proj.vss_project,
+            'vss_service': None,
+            's3_bucket': proj.s3_bucket,
+            's3_prefix': proj.s3_prefix,
+        }
+
+    return None
 
 
 def get_is_enterprise() -> bool:
@@ -99,22 +191,42 @@ def get_is_enterprise() -> bool:
 
 
 def get_s3_config(
-    project_id: int, project_name: str | None = None
-) -> dict[str, str] | None:
+    project_id: int, project_name: str | None = None, vss_project_key: str | None = None
+) -> dict[str, str | None] | None:
     """
     Return S3 config for this project when configured: {"s3_bucket": str, "s3_prefix": str | None}.
     Only returns when project has valid config and s3_bucket is set. Used to show S3 field in applet.
+    If vss_project_key is provided, retrieves S3 config from that specific VSS project config.
     """
     _load_config()
     if not _yaml_config:
         return None
     name = (project_name or _project_id_to_name.get(project_id) or "").strip() or str(project_id)
     proj = _yaml_config.projects.get(name)
-    if not proj or not getattr(proj, "s3_bucket", None):
+    if not proj:
         return None
+
+    s3_bucket = None
+    s3_prefix = None
+
+    # Get S3 config from specific VSS project if key provided
+    if vss_project_key and proj.vss_projects:
+        vss_config = proj.vss_projects.get(vss_project_key)
+        if vss_config:
+            s3_bucket = vss_config.s3_bucket
+            s3_prefix = vss_config.s3_prefix
+
+    # Fallback to legacy top-level S3 config
+    if not s3_bucket:
+        s3_bucket = getattr(proj, "s3_bucket", None)
+        s3_prefix = getattr(proj, "s3_prefix", None)
+
+    if not s3_bucket:
+        return None
+
     return {
-        "s3_bucket": (proj.s3_bucket or "").strip(),
-        "s3_prefix": (getattr(proj, "s3_prefix", None) or "").strip() or None,
+        "s3_bucket": (s3_bucket or "").strip(),
+        "s3_prefix": (s3_prefix or "").strip() or None,
     }
 
 def register_project_id_name(project_id: int, project_name: str) -> None:
@@ -136,6 +248,7 @@ def get_database_entry(
         return None
     name = (project_name or _project_id_to_name.get(project_id) or "").strip() or str(project_id)
     key = (name, port)
+    logger.debug(f"get_database_entry: project_id={project_id}, port={port}, resolved_name={name!r}, key={key}, available_keys={list(cfg.keys())}")
     return cfg.get(key)
 
 

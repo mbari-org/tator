@@ -6,7 +6,7 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
 
 - **Embedding API**: Delegates to Fast-VSS (`http://localhost:8000/embeddings/{project}/`)
   - `POST /embed` - Submit images (multipart/form-data) + project, returns UUID
-  - `GET /embed/{uuid}` - Poll for results (proxies to Fast-VSS `/predict/job/{job_id}/{project}`)
+  - `GET /embed/{uuid}` - Poll for results (job status from Fast-VSS via WebSocket `/ws/predict/job/{job_id}/{project}`)
   - Set `FASTVSS_API_URL` env var to override Fast-VSS base URL
 
 - **Port isolation**: One FiftyOne App instance per Tator project (one port per project)
@@ -19,7 +19,7 @@ Backend service for the Tator dashboard that integrates a Voxel51/FiftyOne embed
 
 - **Launcher**: HostedTemplate integration
   - `GET /message` - Minimal template with single `{{ message }}` (for simple Hosted Template testing)
-  - `GET /render` - Launcher template with **Open FiftyOne** (opens app in new window) and **Sync from Tator** (tparams: project, iframe_host, base_port, sync_service_url, api_url; user enters API token in the applet and clicks "Test token" to enable sync)
+  - `GET /render` - Launcher template with **Open FiftyOne** (opens app in new window) and **Sync from Tator** (tparams: project, iframe_host, base_port, sync_service_url, api_url; user enters API token in the applet and clicks "Verify Token" to enable sync)
   - `GET /launch` - Allocate port, return FiftyOne App URL
   - `POST /sync` - Enqueue Tator-to-FiftyOne sync (requires Redis): fetch media + localizations, crop, build FiftyOne dataset, launch app. Returns `job_id` immediately; poll `GET /sync/status/{job_id}` for completion.
   - `GET /sync/status/{job_id}` - Poll status of a queued sync job.
@@ -101,7 +101,7 @@ Upload uses the most efficient path available: **`aws s3 sync`** when the AWS CL
 
 ### Applet behavior
 
-When a project has `s3_bucket` set in config, the launcher applet shows **S3 bucket** and **S3 prefix** inputs only after the user has entered a valid token and passed **Test token** (and a database entry exists for the project). Values from config are pre-filled; the user can override them before clicking **Load from Tator**. Sync then uses the applet values or, if omitted, the config values.
+When a project has `s3_bucket` set in config, the launcher applet shows **S3 bucket** and **S3 prefix** inputs only after the user has entered a valid token and passed **Verify Token** (and a database entry exists for the project). Values from config are pre-filled; the user can override them before clicking **Load from Tator**. Sync then uses the applet values or, if omitted, the config values.
 
 ## Testing
 
@@ -148,7 +148,7 @@ Sync requires Redis and a running sync worker.
 
 ## Hosted Template applet (recommended)
 
-This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template and renders it with template parameters. The dashboard shows **Open FiftyOne** (opens the app in a new tab) and sync controls (when sync_service_url and api_url are set). Users enter their Tator API token in the applet and click **Test token** to verify it; the Version dropdown and **Sync from Tator** / **Sync to Tator** buttons then become enabled.
+This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.tator.io/docs/developer-guide/applets-and-dashboards/hosted-templates). When an applet uses it, Tator fetches the template and renders it with template parameters. The dashboard shows **Open FiftyOne** (opens the app in a new tab) and sync controls (when sync_service_url and api_url are set). Users enter their Tator API token in the applet and click **Verify Token** to verify it; the Version dropdown and **Sync from Tator** / **Sync to Tator** buttons then become enabled.
 
 ### 1. Register the Hosted Template (organization level)
 
@@ -165,7 +165,7 @@ This service exposes a Jinja2 template for [Tator Hosted Templates](https://www.
      - `iframe_host`: host for the FiftyOne app URL when opening in a new tab. **Use the same host you use to open Tator.** If you open Tator at `http://134.89.17.13:8080`, set `iframe_host` to `134.89.17.13` so the app URL is `http://134.89.17.13:5181/...`. If you use `localhost`, the app will try to load from the user’s machine (connection refused when Tator is opened from another host). Do **not** use `host.docker.internal` (browsers cannot resolve it).
      - `message`: optional header text (if set, replaces the default status line)
      - `config_yaml`: optional YAML config string for FiftyOne; shown in the header and exposed as `window.FIFTYONE_CONFIG_YAML` for scripts
-     - **Sync from Tator / Sync to Tator**: set `sync_service_url` and `api_url` (do **not** set a token tparam). In the applet, the user enters their Tator API token in the password field and clicks **Test token**; once the token is verified, the Version dropdown is filled and **Sync from Tator** / **Sync to Tator** are enabled. Optionally set **version_id** to preselect a version. The token is used only in the browser for sync and is not stored.
+     - **Sync from Tator / Sync to Tator**: set `sync_service_url` and `api_url` (do **not** set a token tparam). In the applet, the user enters their Tator API token in the password field and clicks **Verify Token**; once the token is verified, the Version dropdown is filled and **Sync from Tator** / **Sync to Tator** are enabled. Optionally set **version_id** to preselect a version. The token is used only in the browser for sync and is not stored.
 
 Click **Save**.
 
@@ -198,7 +198,7 @@ Go to the project, then **Analytics** → **Dashboards**. Open the applet. Click
 | **sync_service_url** | `http://localhost:8001` | Required for the "Sync from Tator" button; same machine as Tator from the user's perspective. |
 | **api_url** | `http://localhost:8080` | Sync service calls Tator's API; from the host, Tator is at localhost:8080. |
 
-There is no template parameter named **host**; the **URL** field is where Tator fetches the template from. Do **not** set a token tparam; users enter their Tator API token in the applet and click **Test token** to enable sync. The version list and sync requests use the token in the `Authorization` header (for `/versions`) or in the request (for sync); the token is not stored.
+There is no template parameter named **host**; the **URL** field is where Tator fetches the template from. Do **not** set a token tparam; users enter their Tator API token in the applet and click **Verify Token** to enable sync. The version list and sync requests use the token in the `Authorization` header (for `/versions`) or in the request (for sync); the token is not stored.
 
 ### Tator in Docker: "Connection refused" and "host.docker.internal server IP address not found"
 

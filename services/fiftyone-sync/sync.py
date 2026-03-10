@@ -6,14 +6,12 @@ Phase 2 implementation. Requires fiftyone, tator, Pillow, PyYAML and MongoDB.
 from __future__ import annotations
 
 import glob
-import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-import sys
 import time
 from urllib.parse import urlencode
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,7 +32,6 @@ from database_manager import (
     get_port_for_project,
     get_session,
     get_s3_config,
-    get_vss_project,
 )
 from sync_lock import get_sync_lock_key, release_sync_lock, try_acquire_sync_lock
 
@@ -54,15 +51,18 @@ _DEFAULT_LOCALIZATION_BATCH_SIZE = 5000
 # Each media_id in query string is ~17 bytes; base URL + version ~500; 150 * 17 + 500 < 4094.
 _MAX_SAFE_MEDIA_ID_BATCH_SIZE = 150
 
+# Sample field storing Tator localization modified time (FiftyOne's last_modified_at is read-only)
+TATOR_MODIFIED_AT_FIELD = "tator_modified_at"
+
 # Max log lines stored in RQ job metadata for applet progress display
-_JOB_LOG_LINES_CAP = 400
-_JOB_LOG_FLUSH_EVERY_N_LINES = 10
+_JOB_LOG_LINES_CAP = 4000
+_JOB_LOG_LOG_FLUSH_EVERY_N_LINES = 5
 
 
 class _JobMetaLogHandler(logging.Handler):
     """Logging handler that appends lines to RQ job.meta['log_lines'] for applet progress display."""
 
-    def __init__(self, job: Any, cap: int = _JOB_LOG_LINES_CAP, flush_every: int = _JOB_LOG_FLUSH_EVERY_N_LINES) -> None:
+    def __init__(self, job: Any, cap: int = _JOB_LOG_LINES_CAP, flush_every: int = _JOB_LOG_LOG_FLUSH_EVERY_N_LINES) -> None:
         super().__init__()
         self._job = job
         self._cap = cap
@@ -690,19 +690,6 @@ def _load_localizations_index(jsonl_path: str) -> dict[str, dict]:
     return index
 
 
-def _box_hash(loc: dict | None) -> str:
-    """Hash of bounding box (x, y, width, height) for detecting box changes."""
-    if not loc:
-        return ""
-    x = loc.get("x")
-    y = loc.get("y")
-    w = loc.get("width")
-    h = loc.get("height")
-    return hashlib.sha256(
-        f"{x}|{y}|{w}|{h}".encode()
-    ).hexdigest()
-
-
 def _crop_manifest_path(project_id: int, version_id: int | None) -> str:
     """Path to the crop manifest JSON for a project+version."""
     return os.path.join(_data_dir(project_id, version_id), "crop_manifest.json")
@@ -711,7 +698,7 @@ def _crop_manifest_path(project_id: int, version_id: int | None) -> str:
 def _load_crop_manifest(project_id: int, version_id: int | None) -> dict[str, dict]:
     """
     Load the crop manifest from disk.
-    Returns {elemental_id: {"box_hash": str, "media_id": int, "media_stem": str}} or empty dict.
+    Returns {elemental_id: {"media_id": int, "media_stem": str}} or empty dict.
     """
     path = _crop_manifest_path(project_id, version_id)
     if not os.path.exists(path):
@@ -774,24 +761,26 @@ def _s3_uri_parent_and_stem(s3_uri: str) -> tuple[str, str]:
         return ("unknown", stem)
     return ("unknown", "")
 
-
 def _ensure_s3_bucket_exists(bucket: str) -> None:
     """Create the S3 bucket if it does not exist. Idempotent."""
     import boto3
     from botocore.exceptions import ClientError
 
-    client = boto3.client("s3")
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+    client = boto3.client("s3", region_name=region)
+
     try:
         client.head_bucket(Bucket=bucket)
         logger.debug(f"S3 bucket already exists: {bucket}")
         return
     except ClientError as e:
         code = e.response.get("Error", {}).get("Code", "")
-        if code != "404":
+        if code not in ("404", "NoSuchBucket", "403"):
             raise
-    region = client.meta.region_name or "us-west-2"
+
     try:
-        if region == "us-west-2":
+        if region == "us-east-1":
+            # us-east-1 is the only region that must NOT have LocationConstraint
             client.create_bucket(Bucket=bucket)
         else:
             client.create_bucket(
@@ -800,9 +789,11 @@ def _ensure_s3_bucket_exists(bucket: str) -> None:
             )
         logger.info(f"S3 bucket created: {bucket} (region={region})")
     except ClientError as e:
-        if e.response.get("Error", {}).get("Code") == "BucketAlreadyOwnedByYou":
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("BucketAlreadyOwnedByYou", "BucketAlreadyExists"):
             return
         raise
+
 
 
 def _s3_crops_prefix(base_prefix: str | None, project_id: int, version_id: int | None) -> str:
@@ -926,7 +917,6 @@ def build_fiftyone_dataset_from_s3(
         sample["elemental_id"] = elemental_id
         sample["label"] = label_name
         sample["local_filepath"] = s3_uri.replace("s3://", "")
-        sample.tags.append(label_name)
         samples.append(sample)
 
     if not samples:
@@ -957,14 +947,8 @@ def _find_crop_cache_misses(
     Diff current localizations against the crop manifest and on-disk crop files.
     A localization is a "miss" (needs cropping) when:
       - its elemental_id is absent from the manifest, OR
-      - its box_hash differs from the manifest entry, OR
+      - its Tator modified_datetime differs from the manifest entry, OR
       - the crop file does not exist on disk.
-
-    The media_stem for each localization is resolved in priority order:
-    The media_stem for each localization is resolved in priority order:
-      1. From the existing manifest entry (survives download-dir cleanup)
-      2. From files currently in the download directory
-      3. Bare media_id as fallback (new localizations on first encounter)
 
     Returns:
         media_ids_needed: set of media IDs that must be downloaded (have >= 1 miss)
@@ -1003,7 +987,7 @@ def _find_crop_cache_misses(
             if media_id is None:
                 continue
             mid = int(media_id)
-            current_hash = _box_hash(loc)
+            modified_at = loc.get("modified_datetime") or loc.get("created_datetime")
 
             media_stem = (
                 manifest_stem_map.get(mid)
@@ -1012,7 +996,7 @@ def _find_crop_cache_misses(
             )
 
             updated_manifest[eid] = {
-                "box_hash": current_hash,
+                "modified_at": modified_at,
                 "media_id": mid,
                 "media_stem": media_stem,
             }
@@ -1022,7 +1006,7 @@ def _find_crop_cache_misses(
 
             is_miss = (
                 old_entry is None
-                or old_entry.get("box_hash") != current_hash
+                or old_entry.get("modified_at") != modified_at
                 or not crop_file.exists()
             )
             if is_miss:
@@ -1081,14 +1065,6 @@ def _cleanup_deleted_crops(
     if removed:
         logger.info(f"Cleaned up {removed} orphaned crop files ({len(deleted_eids)} deleted localizations)")
     return removed
-
-
-def _content_hash(label: Any, confidence: Any) -> str:
-    """Hash of label+confidence for sync dedup. Must match sync_edits_to_tator."""
-    return hashlib.sha256(
-        f"{label}|{float(confidence) if confidence is not None else ''}".encode()
-    ).hexdigest()
-
 
 def _tator_localization_url(
     api_url: str,
@@ -1184,6 +1160,64 @@ def _crop_filepath_for_sample(
     return os.path.abspath(os.path.join(crops_dir, media_stem, f"{elemental_id}.png"))
 
 
+def _normalize_modified_at(val: Any) -> float | None:
+    """Convert modified_at from loc or sample to a comparable float timestamp (or None)."""
+    if val is None:
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if isinstance(val, datetime):
+        return val.timestamp()
+    if isinstance(val, date) and not isinstance(val, datetime):
+        return datetime.combine(val, datetime.min.time()).timestamp()
+    if isinstance(val, str):
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            pass
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(val.replace("Z", "+00:00")[:26], fmt).timestamp()
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
+def _apply_loc_to_sample(
+    sample: fo.Sample,
+    loc: dict,
+    *,
+    api_url: str | None = None,
+    project_id: int | None = None,
+    version_id: int | None = None,
+) -> None:
+    """Update an existing sample's metadata from a localization (ground_truth, confidence, tags, annotation, tator_modified_at)."""
+    label = _get_label_from_loc(loc)
+    sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
+    attrs = loc.get("attributes") or {}
+    score = attrs.get("score")
+    verified = attrs.get("verified")
+    label_s = attrs.get("label_s")
+    cluster = attrs.get("cluster")
+    if score is not None:
+        sample["confidence"] = float(score)
+    # Replace tags with current values from loc (avoid stale label/cluster/verified)
+    sample.tags.clear()
+    if verified is not None and bool(verified):
+        sample.tags.append("verified")
+    if label_s is not None and "Unknown" not in label_s:
+        sample.append(label_s)
+    if cluster is not None and "Unknown" not in cluster:
+        sample.tags.append(cluster)
+    if api_url and project_id is not None:
+        tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
+        if tator_url:
+            sample["annotation"] = tator_url
+    modified_at = loc.get("modified_datetime") or loc.get("created_datetime")
+    if modified_at is not None:
+        sample[TATOR_MODIFIED_AT_FIELD] = modified_at
+
+
 def _create_sample_from_loc(
     loc: dict,
     crops_dir: str,
@@ -1206,23 +1240,14 @@ def _create_sample_from_loc(
     filepath = _crop_filepath_for_sample(media_stem, elemental_id, crops_dir, s3_bucket=s3_bucket, s3_prefix=s3_prefix)
     if not (s3_bucket and s3_bucket.strip()) and not os.path.exists(filepath):
         return None
-    sample = fo.Sample(filepath=filepath) 
+    sample = fo.Sample(filepath=filepath)
     sample["local_filepath"] = os.path.abspath(os.path.join(crops_dir, media_stem, f"{elemental_id}.png"))
-    sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
     sample["elemental_id"] = elemental_id
     sample["media_stem"] = media_stem
-    sample["box_hash"] = _box_hash(loc)
-    if api_url and project_id is not None:
-        tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
-        if tator_url:
-            sample["annotation"] = tator_url
-    sample.tags.append(label)
-    attrs = loc.get("attributes") or {}
-    score = attrs.get("Score") or attrs.get("score")
-    if score is not None:
-        sample["confidence"] = float(score)
-    conf = sample["confidence"] if "confidence" in sample else 1.0
-    sample["last_sync_hash"] = _content_hash(label, conf)
+    _apply_loc_to_sample(
+        sample, loc,
+        api_url=api_url, project_id=project_id, version_id=version_id,
+    )
     return sample
 
 
@@ -1237,7 +1262,7 @@ def reconcile_dataset_with_tator(
     """
     Reconcile existing dataset with current Tator localizations:
     - Remove samples whose elemental_id was deleted in Tator
-    - Update samples whose bounding box changed (crop file already overwritten)
+    - Update samples whose modified_datetime changed (crop file already overwritten)
     - Add samples for new elemental_ids in Tator
     """
     tator_eids = set(loc_index.keys())
@@ -1268,8 +1293,8 @@ def reconcile_dataset_with_tator(
     else:
         logger.info(f"Reconcile: 0 localizations from Tator; skipping delete step (keeping existing samples)")
 
-    # 2. Update samples with changed box (crop already overwritten by crop_localizations_parallel)
-    logger.info("Reconcile: Update samples with changed box")
+    # 2. Update samples with changed modified_datetime (crop already overwritten by crop_localizations_parallel)
+    logger.info("Reconcile: Update samples with changed modified_datetime")
     updated = 0
 
     # Pre-collect all samples that need checking to avoid multiple passes
@@ -1282,24 +1307,33 @@ def reconcile_dataset_with_tator(
         if elemental_id and str(elemental_id) in loc_index:
             eid_to_sample[str(elemental_id)] = sample
 
-    # Now process only samples that have matching loc_index entries
+    # Now process only samples that have matching loc_index entries and have been modified
+    api_url = config.get("api_url")
+    project_id = config.get("project_id")
+    version_id = config.get("version_id")
     for eid, sample in eid_to_sample.items():
         loc = loc_index[eid]
-        new_hash = _box_hash(loc)
-        old_hash = getattr(sample, "box_hash", None)
+        modified_at = loc.get("modified_datetime") or loc.get("created_datetime")
+        tator_modified_at = getattr(sample, TATOR_MODIFIED_AT_FIELD, None)
+        mod_ts = _normalize_modified_at(modified_at)
+        last_ts = _normalize_modified_at(tator_modified_at)
 
-        if old_hash != new_hash:
-            sample["box_hash"] = new_hash
-            samples_to_update.append(sample)
+        logger.debug(f"====>Checking sample {sample.id} for update: {eid} modified_at: {modified_at} {TATOR_MODIFIED_AT_FIELD}: {tator_modified_at}")
+        if mod_ts is not None and mod_ts != last_ts:
+            logger.debug(f"====>Sample {sample.id} needs update: {eid} modified_at: {modified_at} {TATOR_MODIFIED_AT_FIELD}: {tator_modified_at}")
+            samples_to_update.append((sample, loc))
             updated += 1
 
-    # Batch save updates
+    # Apply current localization data to changed samples and save
     if samples_to_update:
-        # Save in batches to reduce I/O overhead
         batch_size = 1000
         for i in range(0, len(samples_to_update), batch_size):
             batch = samples_to_update[i:i + batch_size]
-            for sample in batch:
+            for sample, loc in batch:
+                _apply_loc_to_sample(
+                    sample, loc,
+                    api_url=api_url, project_id=project_id, version_id=version_id,
+                )
                 sample.save()
 
         logger.info(f"Reconcile: updated {updated} samples (box changed)")
@@ -1441,27 +1475,11 @@ def build_fiftyone_dataset_from_crops(
             sample_filepath = _crop_filepath_for_sample(
                 media_stem, elemental_id, crops_dir, s3_bucket=s3_bucket, s3_prefix=s3_prefix,
             )
-            sample = fo.Sample(filepath=sample_filepath) 
+            sample = fo.Sample(filepath=sample_filepath)
             sample["local_filepath"] = filepath
             sample["ground_truth"] = fo.Classification(label=label, confidence=1.0)
             sample["elemental_id"] = elemental_id
             sample["media_stem"] = media_stem
-            sample["box_hash"] = _box_hash(loc)
-            api_url = config.get("source_url")
-            project_id = config.get("project_id")
-            version_id = config.get("version_id")
-            if loc and api_url and project_id is not None:
-                tator_url = _tator_localization_url(api_url, project_id, loc, version_id)
-                if tator_url:
-                    sample["annotation"] = tator_url
-            sample.tags.append(label)
-            if loc:
-                attrs = loc.get("attributes") or {}
-                score = attrs.get("Score") or attrs.get("score")
-                if score is not None:
-                    sample["confidence"] = float(score)
-            conf = sample["confidence"] if "confidence" in sample else 1.0
-            sample["last_sync_hash"] = _content_hash(label, conf)
             # Media-level attributes (Image type only), if provided in config
             media_attrs_map = config.get("media_attributes_map") or {}
             if loc:
@@ -1471,6 +1489,23 @@ def build_fiftyone_dataset_from_crops(
                     for k, v in media_attrs.items():
                         if v is not None:
                             sample[k] = v
+                # Localization attributes: confidence, verified, label_s, cluster (same as _create_sample_from_loc)
+                attrs = loc.get("attributes") or {}
+                score = attrs.get("score")
+                verified = attrs.get("verified")
+                label_s = attrs.get("label_s")
+                cluster = attrs.get("cluster")
+                if score is not None:
+                    sample["confidence"] = float(score)
+                if verified is not None and bool(verified):
+                    sample.tags.append("verified")
+                if label_s is not None and "Unknown" not in label_s:
+                    sample.tags.append(label_s)
+                if cluster is not None and "Unknown" not in cluster:
+                    sample.tags.append(cluster)
+                modified_at = loc.get("modified_datetime") or loc.get("created_datetime")
+                if modified_at is not None:
+                    sample[TATOR_MODIFIED_AT_FIELD] = modified_at
             samples.append(sample)
         if max_samples and len(samples) >= max_samples:
             break
@@ -1669,28 +1704,31 @@ def sync_edits_to_tator(
             attrs[score_attr] = float(confidence)
         if not attrs:
             continue
-        # Content-based skip: only push if label/confidence changed since last sync.
-        # Build sets last_sync_hash from Tator; first sync skips all if no user edits.
-        current_hash = _content_hash(label, confidence)
-        last_sync_hash = sample["last_sync_hash"] if "last_sync_hash" in sample else None
-        if current_hash == last_sync_hash:
+
+        modified_at = (
+            sample[TATOR_MODIFIED_AT_FIELD] if TATOR_MODIFIED_AT_FIELD in sample
+            else (sample["modified_datetime"] if "modified_datetime" in sample else None)
+        )
+        created_at = sample["created_datetime"] if "created_datetime" in sample else None
+        # Allow push when we have no timestamps (our samples use tator_modified_at only), or when modified >= created
+        mod_ts = _normalize_modified_at(modified_at)
+        created_ts = _normalize_modified_at(created_at)
+        allow_push = (mod_ts is None and created_ts is None) or (
+            mod_ts is not None and (created_ts is None or mod_ts >= created_ts)
+        )
+        if allow_push:
+            try:
+                _update_localization_attributes(api, project_id, version_id, elemental_id, attrs)
+                sample.save()
+                updated += 1
+            except Exception as e:
+                failed += 1
+                errors.append(f"Sample {sample.id}: {e}")
+        else:
             skipped += 1
             if _debug:
-                logger.info(f"SKIP elem={elemental_id} hash={current_hash[:8]}")
+                logger.info(f"SKIP elem={elemental_id} unchanged since creation")
             continue
-        try:
-            _update_localization_attributes(
-                api, project_id, version_id, str(elemental_id), attrs
-            )
-            sample["last_sync_hash"] = current_hash
-            sample.save()
-            updated += 1
-            if _debug:
-                logger.info(f"UPDATE elem={elemental_id}")
-        except Exception as e:
-            failed += 1
-            errors.append(f"{elemental_id}: {e}")
-            logger.info(f"Failed to update localization {elemental_id}: {e}")
 
     logger.info(f"sync_edits_to_tator: updated={updated} skipped={skipped} failed={failed}")
     return {"status": "ok", "updated": updated, "skipped": skipped, "failed": failed, "errors": errors[:20]}
@@ -1706,6 +1744,7 @@ def run_sync_job(
     database_uri: str | None = None,
     database_name: str | None = None,
     force_sync: bool = False,
+    vss_project_key: str | None = None,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
 ) -> dict[str, Any]:
@@ -1740,6 +1779,7 @@ def run_sync_job(
             database_uri=database_uri,
             database_name=database_name,
             force_sync=force_sync,
+            vss_project_key=vss_project_key,
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,
         )
@@ -1762,17 +1802,19 @@ def sync_project_to_fiftyone(
     database_uri: str | None = None,
     database_name: str | None = None,
     force_sync: bool = False,
+    vss_project_key: str | None = None,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
 ) -> dict[str, Any]:
     """
     Fetch Tator media and localizations, build FiftyOne dataset, launch App on given port.
     Uses per-project MongoDB database (database_uri when provided, else resolved via config; database_name override or get_database_name).
+    Optional vss_project_key: selects a specific VSS project configuration for embeddings.
     Optional s3_bucket/s3_prefix: sync crop images to S3 (not full images) and build a second dataset from S3 (parent folder = label).
     Returns {"status": "ok", "dataset_name": str, "database_name": str} or raises.
     """
     if not (s3_bucket and s3_bucket.strip()):
-        s3_cfg = get_s3_config(project_id, project_name=project_name)
+        s3_cfg = get_s3_config(project_id, project_name=project_name, vss_project_key=vss_project_key)
         if s3_cfg:
             s3_bucket = s3_cfg.get("s3_bucket") or None
             s3_prefix = s3_cfg.get("s3_prefix") or s3_prefix
@@ -1787,6 +1829,9 @@ def sync_project_to_fiftyone(
         (database_name.strip() if database_name and database_name.strip() else None)
         or (sess.get("database_name") if sess else None)
     )
+    # Ensure resolved_db has a default value if not set
+    if not resolved_db:
+        resolved_db = get_database_name(project_id, port, project_name=project_name)
     resolved_uri = (database_uri.strip() if database_uri and database_uri.strip() else None) or get_database_uri(project_id, port, project_name=project_name)
     if not get_is_enterprise():
         fo.config.database_uri = resolved_uri
@@ -1807,7 +1852,9 @@ def sync_project_to_fiftyone(
         raise RuntimeError(f"Pre-flight connection check failed: {exc}") from exc
 
     lock_key = get_sync_lock_key(resolved_db, project_id, version_id)
+    logger.info(f"Acquiring sync lock: key={lock_key} (resolved_db={resolved_db}, project_id={project_id}, version_id={version_id})")
     if not try_acquire_sync_lock(lock_key):
+        logger.warning(f"Failed to acquire sync lock: key={lock_key} - another sync is in progress")
         return {
             "status": "busy",
             "message": "This dataset is being updated by another sync. Please try again in a few minutes.",
@@ -1915,16 +1962,13 @@ def sync_project_to_fiftyone(
 
             # 9. Optional: two-way sync crop images with S3 (prefix = e.g. fiftyone/raw/12/v21/crops)
             if s3_bucket and os.path.isdir(crops):
-                try:
-                    _sync_local_dir_with_s3(crops, s3_bucket, s3_crops_prefix)
-                except Exception as e:
-                    logger.warning(f"S3 sync failed (dataset from crops still built): {e}")
+                _sync_local_dir_with_s3(crops, s3_bucket, s3_crops_prefix)
 
             # 10. Remove downloaded media to reclaim disk space
             _cleanup_download_dir(project_id)
 
         except Exception as e:
-            logger.info(f"fetch/save media or localizations failed: {e}")
+            logger.error(f"Sync failed: {e}")
             return {
                 "status": "error",
                 "message": str(e),
@@ -2008,13 +2052,18 @@ def sync_project_to_fiftyone(
             project_name_for_config = getattr(proj, "name", None) or str(project_id)
         except Exception:
             project_name_for_config = str(project_id)
-        vss_project = get_vss_project(project_name_for_config, port) if project_name_for_config else None
-        if vss_project is None or not str(vss_project).strip():
-            vss_project = embeddings_config.get("project_name")
-        if vss_project is None or not str(vss_project).strip():
-            vss_project = str(project_id)
-        else:
-            vss_project = str(vss_project).strip()
+
+        from database_manager import get_vss_project_config
+
+        vss_project = None
+        vss_config = get_vss_project_config(project_name_for_config, vss_project_key)
+        if vss_config:
+            vss_project = vss_config.get('vss_project')
+            if vss_project_key:
+                logger.info(f"Using VSS project from key {vss_project_key!r}: {vss_project}")
+            else:
+                logger.info(f"Using VSS project from config: {vss_project}")
+
         if vss_project:
             model_info = {
                 "embeddings_field": embeddings_config.get("embeddings_field", "embeddings"),
@@ -2059,8 +2108,12 @@ def sync_project_to_fiftyone(
 
         # URL for the launcher: must use FIFTYONE_APP_PUBLIC_BASE_URL so the dashboard
         # opens the correct FiftyOne app (e.g. maximilian.shore.mbari.org), always http.
+        # In enterprise mode, don't append port; use the base URL directly (e.g. https://mbari.fiftyone.ai)
         public_url = os.environ.get("FIFTYONE_APP_PUBLIC_BASE_URL", "http://localhost").strip()
-        app_url = f"{public_url.rstrip('/')}:{port}"
+        if get_is_enterprise():
+            app_url = public_url.rstrip('/')
+        else:
+            app_url = f"{public_url.rstrip('/')}:{port}"
         logger.info(f"FiftyOne app URL (FIFTYONE_APP_PUBLIC_BASE_URL): {app_url}")
 
         result = {
@@ -2077,6 +2130,7 @@ def sync_project_to_fiftyone(
         result["port"] = port
         return result
     finally:
+        logger.info(f"Releasing sync lock: key={lock_key}")
         release_sync_lock(lock_key)
 
 
@@ -2171,7 +2225,7 @@ def main() -> None:
     if crops and localizations_path and os.path.isdir(crops):
         if not get_is_enterprise():
             fo.config.database_uri = get_database_uri(project_id, port, project_name=project_name)
-            fo.config.database_name = get_database_name(project_id, port, project_name=project_name)
+            fo.config.database_name = get_database_name(project_id, port, project_name)
             os.environ["FIFTYONE_DATABASE_URI"] = fo.config.database_uri
             os.environ["FIFTYONE_DATABASE_NAME"] = fo.config.database_name
         config = config

@@ -8,6 +8,9 @@ python-multipart>=0.0.6
 # HTTP client for Fast-VSS embedding API
 httpx>=0.27.0
 
+# WebSocket client for Fast-VSS job status (/ws/predict/job/{job_id}/{project})
+websockets>=12.0
+
 # Tator API client
 tator>=1.4.0
 requests>=2.32.0

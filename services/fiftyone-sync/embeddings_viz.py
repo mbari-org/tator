@@ -3,11 +3,14 @@ Compute embeddings and UMAP visualization for FiftyOne datasets with caching.
 
 Embeddings are fetched from the embed service at {base}/embed/{project}
 where project is typically the Tator project ID (sync passes str(project_id) by default; config can override).
+Job status is received via WebSocket {base}/ws/predict/job/{job_id}/{project}.
 UMAP requires umap-learn (see requirements.txt).
 """
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 import time
@@ -15,11 +18,53 @@ from typing import Optional
 
 logger = logging.getLogger(__name__) 
 
-# Base URL for embed service (POST /embed/{project} no trailing slash, GET /predict/job/{job_id}/{project})
+# Base URL for embed service (POST /embed/{project}, job status via WS /ws/predict/job/{job_id}/{project})
 EMBED_SERVICE_BASE_URL = os.environ.get("FASTVSS_API_URL", "http://cortext.shore.mbari.org/vss").rstrip("/")
 
 # Stop embedding run after this many failed fetch attempts
 EMBEDDING_FETCH_MAX_RETRIES = 3
+
+# Max time to wait for one job over WebSocket (align with Fast-VSS WS_MAX_WAIT)
+_WS_JOB_TIMEOUT = 300.0
+
+
+def _service_base_to_ws(base: str) -> str:
+    """Derive WebSocket base URL from service base (http -> ws, https -> wss)."""
+    base = base.rstrip("/")
+    if base.startswith("https://"):
+        return "wss://" + base[8:]
+    if base.startswith("http://"):
+        return "ws://" + base[7:]
+    return "ws://" + base
+
+
+async def _wait_job_result_ws(ws_url: str, timeout: float = _WS_JOB_TIMEOUT) -> dict:
+    """
+    Wait for job completion via Fast-VSS WebSocket. Returns result dict on "done"; raises on "failed"/"error"/timeout.
+    """
+    import websockets
+    deadline = time.monotonic() + timeout
+    async with websockets.connect(
+        ws_url,
+        open_timeout=10,
+        close_timeout=5,
+        max_size=10 * 1024 * 1024,  # 10MB max message size (default is 1MB)
+    ) as ws:
+        while True:
+            remaining = max(1.0, deadline - time.monotonic())
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            msg = json.loads(raw)
+            status = msg.get("status")
+            logger.debug(f"WebSocket message: status={status}, keys={list(msg.keys())}, msg_size={len(raw)} bytes")
+            if status == "done":
+                result = msg.get("result") or msg
+                if isinstance(result, dict):
+                    logger.debug(f"Result keys: {list(result.keys())}")
+                return result
+            if status == "failed":
+                raise RuntimeError(msg.get("message", "Job failed"))
+            if status == "error":
+                raise RuntimeError(msg.get("message", str(msg)))
 
 
 def has_embeddings(dataset: "fo.Dataset", embeddings_field: str) -> bool:
@@ -40,36 +85,43 @@ def _compute_embeddings_via_service(
     embeddings_field: str,
     service_url: str,
     batch_size: int = 32,
-    poll_interval: float = 2.0,
-    poll_timeout: float = 300.0
+    poll_timeout: float = 300.0,
 ) -> None:
     """
     Compute embeddings by sending sample images to the embed service and writing results to the dataset.
 
     Service: POST {service_url}/embed/{project_name} (no trailing slash) with files -> job_id
-             then GET {service_url}/predict/job/{job_id}/{project_name} until embeddings returned.
+             then WebSocket {service_url}/ws/predict/job/{job_id}/{project_name} until status done/failed.
     """
     import fiftyone as fo
     import httpx
     import numpy as np
 
     base = service_url.rstrip("/")
-    samples = list(dataset.iter_samples(autosave=False))
-    if not samples:
+    ws_base = _service_base_to_ws(base)
+    all_samples = list(dataset.iter_samples(autosave=True))
+    if not all_samples:
         return
  
-    path_pairs = []
-    for s in samples:
+    # Build list of (sample, filepath) pairs for samples with valid local files
+    valid_samples = []
+    paths_to_open = []
+    for s in all_samples:
         if "local_filepath" in s:
             path_to_open = s["local_filepath"]
         else:
             continue
         if os.path.isfile(path_to_open):
-            path_pairs.append((path_to_open, s["local_filepath"]))
-    paths_to_open = [p for p, _ in path_pairs]
-    sample_filepaths = [fp for _, fp in path_pairs]
+            valid_samples.append(s)
+            paths_to_open.append(path_to_open)
 
-    # Submit all batches, then poll all jobs
+    if not valid_samples:
+        logger.warning("No valid samples with local_filepath found")
+        return
+
+    logger.info(f"Processing embeddings for {len(valid_samples)} samples (out of {len(all_samples)} total)")
+
+    # Submit all batches, then wait for each job via WebSocket
     num_batches = (len(paths_to_open) + batch_size - 1) // batch_size
     jobs: list[tuple[int, str]] = []
 
@@ -113,39 +165,80 @@ def _compute_embeddings_via_service(
                 ) from last_error
 
         for batch_idx, job_id in jobs:
-            poll_url = f"{base}/predict/job/{job_id}/{project_name}"
+            ws_url = f"{ws_base}/ws/predict/job/{job_id}/{project_name}"
+            logger.info(f"Using WebSocket URL: {ws_url}")
+            last_error = None
             for attempt in range(EMBEDDING_FETCH_MAX_RETRIES):
                 try:
-                    r = client.get(poll_url)
-                    r.raise_for_status()
-                    out = r.json()
-                    status = out.get("status")
-                    if status == "failed":
-                        err = out.get("error", "unknown")
-                        raise RuntimeError(f"Job failed: {err}")
-                    if status == "done":
-                        raw_result = out.get("result")
-                        if not isinstance(raw_result, dict):
-                            logger.warning(
-                                f"Poll response 'result' is not a dict (type={type(raw_result).__name__}); {raw_result}"
-                            )
-                            break
-                        emb = raw_result.get("embeddings")
-                        start = batch_idx * batch_size
-                        end = start + batch_size
-                        for s, emb in zip(samples[start:end], emb):
-                            s[embeddings_field] = emb
-                        break
+                    raw_result = asyncio.run(_wait_job_result_ws(ws_url, timeout=poll_timeout))
+                    logger.debug(f"Batch {batch_idx + 1} raw_result type: {type(raw_result).__name__}, keys: {raw_result.keys() if isinstance(raw_result, dict) else 'N/A'}")
+                    if not isinstance(raw_result, dict):
+                        logger.warning(
+                            f"WebSocket result is not a dict (type={type(raw_result).__name__}); using as-is"
+                        )
+                        emb_list = raw_result if isinstance(raw_result, list) else []
                     else:
-                        time.sleep(poll_interval)
-                except Exception as e:
-                    logger.warning(
-                        f"Poll batch {batch_idx + 1} attempt {attempt + 1}/{EMBEDDING_FETCH_MAX_RETRIES} failed: {e}"
-                    )
+                        # Try to extract embeddings from result
+                        emb_list = raw_result.get("embeddings")
+                        if emb_list is None:
+                            # Fallback: check if result itself is the embeddings list
+                            result_field = raw_result.get("result")
+                            if isinstance(result_field, list):
+                                emb_list = result_field
+                            elif isinstance(result_field, dict):
+                                emb_list = result_field.get("embeddings")
+                            else:
+                                emb_list = []
+
+                        if not emb_list:
+                            logger.warning(f"Batch {batch_idx + 1}: No embeddings found in result. Available keys: {list(raw_result.keys())}")
+                            logger.debug(f"Batch {batch_idx + 1}: raw_result content (first 500 chars): {str(raw_result)[:500]}")
+
+                    if not emb_list:
+                        logger.error(f"Batch {batch_idx + 1}: Empty embeddings list received")
+                    else:
+                        logger.info(f"Batch {batch_idx + 1}: Received {len(emb_list)} embeddings")
+                        # Log the type of the first embedding for debugging
+                        if len(emb_list) > 0:
+                            first_emb = emb_list[0]
+                            logger.debug(f"Batch {batch_idx + 1}: First embedding type: {type(first_emb).__name__}, "
+                                       f"length: {len(first_emb) if hasattr(first_emb, '__len__') else 'N/A'}")
+
+                    start = batch_idx * batch_size
+                    end = min(start + batch_size, len(valid_samples))
+                    saved_count = 0
+                    for s, emb in zip(valid_samples[start:end], emb_list):
+                        # Convert embedding to list if it's not already (FiftyOne requires list/tuple)
+                        if isinstance(emb, np.ndarray):
+                            emb = emb.tolist()
+                        elif not isinstance(emb, (list, tuple)):
+                            emb = list(emb)
+                        s[embeddings_field] = emb
+                        s.save()  # Explicitly save each sample to ensure persistence
+                        saved_count += 1
+                    logger.info(f"Batch {batch_idx + 1}: Set embeddings for {saved_count} samples (range {start}-{end})")
+                    last_error = None
                     break
- 
-        dataset.save()
-    logger.info(f"Embeddings stored in: {embeddings_field} ({len(samples)} samples)")
+                except Exception as e:
+                    last_error = e
+                    logger.warning(
+                        f"WebSocket batch {batch_idx + 1} attempt {attempt + 1}/{EMBEDDING_FETCH_MAX_RETRIES} failed: {e}"
+                    )
+            if last_error is not None:
+                logger.error(f"Batch {batch_idx + 1} failed after {EMBEDDING_FETCH_MAX_RETRIES} attempts: {last_error}")
+                raise RuntimeError(f"Embedding job failed: {last_error}") from last_error
+
+    logger.info(f"Embeddings stored in: {embeddings_field} ({len(valid_samples)} samples)")
+
+    # Reload dataset to ensure all changes are visible
+    dataset.reload()
+
+    # Verify embeddings were actually saved
+    samples_with_embeddings = dataset.exists(embeddings_field).count()
+    logger.info(f"Verification: {samples_with_embeddings} samples have embeddings in field '{embeddings_field}'")
+    if samples_with_embeddings == 0:
+        logger.error(f"WARNING: No embeddings were saved! This may indicate a format mismatch in the WebSocket response.")
+        logger.error(f"Dataset has {len(dataset)} total samples, {len(valid_samples)} valid samples were processed")
 
 
 def compute_embeddings_and_viz(

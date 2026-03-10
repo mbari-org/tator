@@ -1,44 +1,36 @@
 # Batch sizes (fallbacks in code: media_id 200, localization 5000, embeddings 32)
-media_id_batch_size: 200
-localization_batch_size: 5000
+media_id_batch_size: 500
+localization_batch_size: 10000
 
 # When true (enterprise): enable S3 upload and do not set fo.config.database_uri/database_name
 # (FiftyOne uses its own config). When false: S3 upload disabled, sync sets database per project/port.
-is_enterprise: false
+# In enterprise mode, the FiftyOne app URL will be constructed without port (e.g., https://mbari.fiftyone.ai)
+# and the dataset link will be in the format: https://mbari.fiftyone.ai/datasets/{project-name}-v{version-id}-{port}/samples
+is_enterprise: true
 
-# Optional: embeddings and UMAP; batch_size is per-request size for embed service
-# embeddings:
-#   batch_size: 32
-#   embeddings_field: embeddings
-#   brain_key: umap_viz
-#   umap_seed: 51
-#   force_embeddings: false
-#   force_umap: false
-#   service_url: null
-#   project_name: null
+embeddings:
+  embeddings_field: "embeddings"
+  brain_key: "umap_viz"
+  umap_seed: 51
+  force_embeddings: false
+  batch_size: 512
+  force_umap: false
+  service_url: "https://cortex.shore.mbari.org/vss/"
 
-# Example: per-project MongoDB URI and FiftyOne app port mapping.
-# See containers/fiftyone-sync for the compose stack.
-# projects:
-#   ObjectDetection:
-#     databases:
-#       - uri: "mongodb://localhost:27017"
-#         port: 5151
-#   VideoSegmentation:
-#     databases:
-#       - uri: "mongodb://localhost:27018"
-#         port: 5152
-#   #
-# Multi-project example (optional second Mongo per project) with a link to the VSS service to compute embeddings.
-# Optional per-project: s3_bucket and s3_prefix for crop upload (sync crops dir to S3, then build dataset from S3 listing).
-# When set, the applet shows S3 bucket/prefix fields (only when token is valid). Use AWS credentials (env or IAM) for upload.
+# Per-project VSS and S3 configuration.
+# In enterprise mode, FiftyOne manages its own database — no databases: entry is needed.
+# Each project entry requires:
+#   vss_projects: (dict of named VSS configs, each with vss_project, vss_service, s3_bucket, s3_prefix)
 projects:
-  "901902-uavs":
-    vss_project: "500055-VARS"
-    # s3_bucket: "my-bucket"
-    # s3_prefix: "fiftyone/raw"
-    databases:
-      - uri: "mongodb://localhost:27017"
-        port: 5151
-      # - uri: "mongodb://localhost:27018"
-      #   port: 5152
+  "902004-Planktivore":
+    vss_projects:
+      high-mag:
+        vss_project: "902004-Planktivore-HighMag"
+        vss_service: "https://cortex.shore.mbari.org/vss"
+        s3_bucket: "902004-planktivore-highmag"
+        s3_prefix: "fiftyone/raw"
+      low-mag:
+        vss_project: "902004-Planktivore-LowMag"
+        vss_service: "https://cortex.shore.mbari.org/vss"
+        s3_bucket: "902004-planktivore-lowmag"
+        s3_prefix: "fiftyone/raw"

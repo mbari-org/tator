@@ -56,12 +56,14 @@ def enqueue_sync(
     database_uri: str | None = None,
     database_name: str | None = None,
     force_sync: bool = False,
+    vss_project_key: str | None = None,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
 ) -> str:
     """
     Enqueue a sync job. Returns RQ job id. Requires Redis.
     project_name is used by the worker to resolve get_database_uri(project_id, port).
+    vss_project_key is used to select a specific VSS project configuration for embeddings.
     """
     from rq import Queue
 
@@ -78,6 +80,7 @@ def enqueue_sync(
         database_uri=database_uri,
         database_name=database_name,
         force_sync=force_sync,
+        vss_project_key=vss_project_key,
         s3_bucket=s3_bucket,
         s3_prefix=s3_prefix,
         job_timeout=3600 * 24,  # 24h for large projects

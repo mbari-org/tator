@@ -1,5 +1,7 @@
 """
-Mutex for FiftyOne sync: only one sync may update a given dataset at a time.
+Mutex for FiftyOne sync: only one sync per project at a time.
+Different versions of the same project cannot sync concurrently because they share
+the download directory (/tmp/fiftyone_sync/downloads/{project_id}).
 Uses Redis (required). Set REDIS_HOST or REDIS_URL.
 """
 
@@ -46,9 +48,12 @@ def _get_connection():
 
 
 def get_sync_lock_key(resolved_db: str, project_id: int, version_id: int | None) -> str:
-    """Return a unique key for the dataset being synced (same key = same dataset)."""
-    v = version_id if version_id is not None else "default"
-    return f"{LOCK_KEY_PREFIX}:{resolved_db}:{project_id}:{v}"
+    """Return a unique key for the project being synced (same key = same project).
+
+    Lock is per-project (not per-version) because different versions share resources
+    like the download directory (/tmp/fiftyone_sync/downloads/{project_id}).
+    """
+    return f"{LOCK_KEY_PREFIX}:{resolved_db}:{project_id}"
 
 
 def try_acquire_sync_lock(

@@ -29,10 +29,21 @@ class DatabaseEntry:
 
 
 @dataclass
-class ProjectConfig:
-    """Per-project config: optional vss_project, optional S3 (bucket/prefix for crop image upload), and list of databases (uri/port). Key is project name."""
+class VssProjectConfig:
+    """VSS project configuration with service URL and S3 settings."""
 
-    vss_project: str | None = None
+    vss_project: str
+    vss_service: str | None = None
+    s3_bucket: str | None = None
+    s3_prefix: str | None = None
+
+
+@dataclass
+class ProjectConfig:
+    """Per-project config: optional vss_project (single or dict), optional S3 (bucket/prefix for crop image upload), and list of databases (uri/port). Key is project name."""
+
+    vss_project: str | None = None  # Legacy single VSS project (backward compatibility)
+    vss_projects: dict[str, VssProjectConfig] = field(default_factory=dict)  # New nested VSS projects
     s3_bucket: str | None = None
     s3_prefix: str | None = None
     databases: list[DatabaseEntry] = field(default_factory=list)
@@ -97,11 +108,55 @@ class DatabaseUriConfig:
                 raise ValueError(
                     f"project {key!r} must be a mapping, got {type(proj).__name__}"
                 )
+
+            # Parse legacy single vss_project
             vss_project = proj.get("vss_project")
             if vss_project is not None and not isinstance(vss_project, str):
                 raise ValueError(
                     f"project {key!r} 'vss_project' must be a string if present, got {type(vss_project).__name__}"
                 )
+
+            # Parse new nested vss_projects
+            vss_projects_raw = proj.get("vss_projects")
+            vss_projects_dict: dict[str, VssProjectConfig] = {}
+            if vss_projects_raw is not None:
+                if not isinstance(vss_projects_raw, dict):
+                    raise ValueError(
+                        f"project {key!r} 'vss_projects' must be a mapping, got {type(vss_projects_raw).__name__}"
+                    )
+                for vss_key, vss_config in vss_projects_raw.items():
+                    if not isinstance(vss_config, dict):
+                        raise ValueError(
+                            f"project {key!r} vss_projects[{vss_key!r}] must be a mapping, got {type(vss_config).__name__}"
+                        )
+                    vss_proj_name = vss_config.get("vss_project")
+                    if not isinstance(vss_proj_name, str):
+                        raise ValueError(
+                            f"project {key!r} vss_projects[{vss_key!r}] 'vss_project' must be a string, got {type(vss_proj_name).__name__}"
+                        )
+                    vss_service = vss_config.get("vss_service")
+                    if vss_service is not None and not isinstance(vss_service, str):
+                        raise ValueError(
+                            f"project {key!r} vss_projects[{vss_key!r}] 'vss_service' must be a string if present, got {type(vss_service).__name__}"
+                        )
+                    vss_s3_bucket = vss_config.get("s3_bucket")
+                    if vss_s3_bucket is not None and not isinstance(vss_s3_bucket, str):
+                        raise ValueError(
+                            f"project {key!r} vss_projects[{vss_key!r}] 's3_bucket' must be a string if present, got {type(vss_s3_bucket).__name__}"
+                        )
+                    vss_s3_prefix = vss_config.get("s3_prefix")
+                    if vss_s3_prefix is not None and not isinstance(vss_s3_prefix, str):
+                        raise ValueError(
+                            f"project {key!r} vss_projects[{vss_key!r}] 's3_prefix' must be a string if present, got {type(vss_s3_prefix).__name__}"
+                        )
+                    vss_projects_dict[str(vss_key)] = VssProjectConfig(
+                        vss_project=vss_proj_name,
+                        vss_service=(vss_service.strip() or None) if (vss_service and isinstance(vss_service, str)) else None,
+                        s3_bucket=(vss_s3_bucket.strip() or None) if (vss_s3_bucket and isinstance(vss_s3_bucket, str)) else None,
+                        s3_prefix=(vss_s3_prefix.strip() or None) if (vss_s3_prefix and isinstance(vss_s3_prefix, str)) else None,
+                    )
+
+            # Parse legacy top-level S3 config
             s3_bucket = proj.get("s3_bucket")
             if s3_bucket is not None and not isinstance(s3_bucket, str):
                 raise ValueError(
@@ -112,6 +167,7 @@ class DatabaseUriConfig:
                 raise ValueError(
                     f"project {key!r} 's3_prefix' must be a string if present, got {type(s3_prefix).__name__}"
                 )
+
             db_list_raw = proj.get("databases")
             if db_list_raw is None:
                 db_list_raw = []
@@ -138,6 +194,7 @@ class DatabaseUriConfig:
                 entries.append(DatabaseEntry(uri=uri, port=port))
             projects[str(key)] = ProjectConfig(
                 vss_project=vss_project,
+                vss_projects=vss_projects_dict,
                 s3_bucket=(s3_bucket.strip() or None) if (s3_bucket and isinstance(s3_bucket, str)) else None,
                 s3_prefix=(s3_prefix.strip() or None) if (s3_prefix and isinstance(s3_prefix, str)) else None,
                 databases=entries,
