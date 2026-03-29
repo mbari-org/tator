@@ -1,0 +1,6 @@
+# Bind-mounted runtime data (see DATA_DIR / example-env). Postgres and other
+# dirs are often not readable by the build; they are never needed in images.
+tator_data/
+
+# Smaller, faster context for builds rooted at the repo (tator, client, postgis, ui, …)
+.git/
