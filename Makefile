@@ -211,7 +211,6 @@ mbari: install-node api/main/version.py clean_schema
 	docker tag mbari/tator_ui:$(GIT_VERSION) mbari/tator_ui:latest
 	docker tag mbari/tator_client:$(GIT_VERSION) mbari/tator_client:latest
 	docker tag mbari/svt_transcoder:$(GIT_VERSION) mbari/svt_transcoder:latest
-	docker tag mbari/fiftyone_sync:$(GIT_VERSION) mbari/fiftyone_sync:latest
 	docker push mbari/tator_online:$(GIT_VERSION)
 	docker push mbari/tator_transcode:$(GIT_VERSION)
 	docker push mbari/tator_postgis:$(GIT_VERSION)
@@ -263,7 +262,7 @@ endif
 
 .PHONY: tator-image
 tator-image:
-	DOCKER_BUILDKIT=1 docker build  --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --network host -t $(REGISTRY)/tator_online:$(GIT_VERSION) -f containers/tator/Dockerfile . || exit 255
+	DOCKER_BUILDKIT=1 docker build --build-arg GIT_VERSION=$(GIT_VERSION) --build-arg APT_REPO_HOST=$(APT_REPO_HOST) --network host -t $(REGISTRY)/tator_online:$(GIT_VERSION) -f containers/tator/Dockerfile . || exit 255
 	mkdir -p .token
 	touch .token/tator_online_$(GIT_VERSION)
 

@@ -1,5 +1,5 @@
 FROM ubuntu:24.04
-MAINTAINER CVision AI <info@cvisionai.com>
+MAINTAINER DCline <dcline@mbari.org>
 
 ARG APT_REPO_HOST=http://archive.ubuntu.com/ubuntu/
 ENV APT_REPO_HOST=${APT_REPO_HOST}
@@ -27,7 +27,7 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # Install pip packages
 RUN python3 -m venv tator
 COPY containers/tator/requirements.txt requirements.txt
-RUN . tator/bin/activate && pip --no-cache-dir --timeout=1000 install --upgrade pip setuptools && pip --no-cache-dir install -r requirements.txt
+RUN . tator/bin/activate && pip --no-cache-dir install -r requirements.txt
 RUN rm requirements.txt
 ENV PATH="/tator/bin:$PATH"
 
