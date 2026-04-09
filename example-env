@@ -31,6 +31,10 @@ REDIS_HOST=redis
 # Transcode service host
 TRANSCODE_HOST=http://transcode
 
+# If transcode workers run outside Docker (separate machine), set to the public REST API base
+# URL workers can reach (no trailing slash), e.g. https://tator.example.com
+# TRANSCODE_WORKER_API_HOST=https://tator.example.com
+
 # Bucket config
 DEFAULT_LIVE_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE
 DEFAULT_LIVE_SECRET_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY

@@ -36,6 +36,11 @@ COMPOSE_DEPLOY = os.getenv("COMPOSE_DEPLOY")
 if GUNICORN_HOST is not None and COMPOSE_DEPLOY is not None:
     if COMPOSE_DEPLOY.lower() == "true":
         HOST = GUNICORN_HOST
+# When transcode workers run on a separate machine they cannot resolve Docker-internal
+# hostnames like "gunicorn".  Set TRANSCODE_WORKER_API_HOST to the public Tator URL
+# that remote workers can reach (e.g. https://tator.example.com).
+_WORKER_API_OVERRIDE = os.getenv("TRANSCODE_WORKER_API_HOST", "").strip().rstrip("/")
+JOB_HOST = _WORKER_API_OVERRIDE if _WORKER_API_OVERRIDE else HOST
 ENDPOINT = f"{os.getenv('TRANSCODE_HOST')}/jobs"
 
 
@@ -165,14 +170,13 @@ class TranscodeListAPI(BaseListView):
             media_obj, _, section_obj = _create_media(project, params, self.request.user)
             media_id = media_obj.id
             section_id = section_obj.id
-        logger.info(f"HOST: {HOST}")
         response = requests.post(
             ENDPOINT,
             json=[
                 {
                     "url": url,
                     "size": upload_size,
-                    "host": HOST,
+                    "host": JOB_HOST,
                     "token": str(token),
                     "project": project,
                     "type": entity_type,
